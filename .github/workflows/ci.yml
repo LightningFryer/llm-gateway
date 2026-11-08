@@ -98,3 +98,26 @@ jobs:
           file: ./deploy/Dockerfile.backend
           push: false
           tags: relay-gateway:latest
+
+  frontend-check:
+    name: Frontend Lint & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: ./dashboard
+        run: npm ci
+
+      - name: Run Next.js Lint
+        working-directory: ./dashboard
+        run: npm run lint
+
+      - name: Build Next.js Dashboard
+        working-directory: ./dashboard
+        run: npm run build

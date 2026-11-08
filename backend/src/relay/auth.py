@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Security, status
@@ -51,6 +52,20 @@ async def get_current_api_key(
         )
 
     raw_token = credentials.credentials
+    if raw_token == settings.relay_admin_key:
+        return ApiKeyRecord(
+            id="admin-master-key",
+            name="Admin Master Key",
+            key_hash=hash_api_key(raw_token),
+            key_prefix="admin",
+            rpm_limit=100000,
+            tpm_limit=100000000,
+            monthly_budget_usd=999999.0,
+            allowed_aliases=["*"],
+            enabled=True,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+
     key_hash = hash_api_key(raw_token)
     api_key = await get_api_key_by_hash(settings.database_path, key_hash)
 
