@@ -3,8 +3,9 @@
 import asyncio
 import os
 import tempfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 
+import fakeredis
 import fakeredis.aioredis as fake_aioredis
 import pytest
 from fastapi.testclient import TestClient
@@ -29,9 +30,9 @@ def temp_db_path() -> Iterator[str]:
 
 
 @pytest.fixture
-def fake_redis() -> AsyncIterator[fake_aioredis.FakeRedis]:
+def fake_redis() -> Iterator[fake_aioredis.FakeRedis]:
     """Provides an isolated in-memory fakeredis client for testing."""
-    server = fake_aioredis.FakeServer()
+    server = fakeredis.FakeServer()
     client = fake_aioredis.FakeRedis(server=server, decode_responses=True)
     yield client
 

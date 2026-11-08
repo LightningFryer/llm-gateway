@@ -1,4 +1,4 @@
-"""OpenAI-compatible /v1 endpoints with transparent failover and resilience engine."""
+"""OpenAI-compatible /v1 endpoints with routing, caching, rate limiting, and resilience."""
 
 from __future__ import annotations
 
@@ -11,11 +11,19 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from relay.auth import get_current_api_key
+from relay.cache import (
+    CachedEntry,
+    build_cache_key,
+    get_response_cache,
+    should_cache_request,
+)
 from relay.circuit_breaker import CircuitState, get_circuit_breaker
+from relay.config import get_settings
 from relay.db import ApiKeyRecord, RequestLogRecord, get_log_writer
 from relay.events import RelayEvent, get_event_bus
 from relay.providers import (
@@ -25,6 +33,13 @@ from relay.providers import (
     ChatMessage,
     TokenUsage,
     get_provider,
+)
+from relay.ratelimit import (
+    MemoryRateLimiter,
+    RateLimiter,
+    ResilientRateLimiter,
+    SlidingWindowRateLimiter,
+    TokenBucketRateLimiter,
 )
 from relay.retry import is_retryable_error
 from relay.router import Router, get_router
@@ -36,12 +51,72 @@ router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 _provider_semaphores: dict[str, asyncio.Semaphore] = {}
 CONCURRENCY_LIMIT_PER_PROVIDER = 50
 
+# Fallback in-memory rate limiter
+_memory_limiter = MemoryRateLimiter()
+
 
 def _get_semaphore(provider_name: str) -> asyncio.Semaphore:
     """Returns or creates the concurrency semaphore for a provider."""
     if provider_name not in _provider_semaphores:
         _provider_semaphores[provider_name] = asyncio.Semaphore(CONCURRENCY_LIMIT_PER_PROVIDER)
     return _provider_semaphores[provider_name]
+
+
+_last_redis_check_ts: float = 0.0
+_redis_is_online: bool = False
+_shared_redis_client: aioredis.Redis | None = None
+
+
+async def _get_active_redis() -> aioredis.Redis | None:
+    """Checks and caches whether Redis is currently reachable, refreshing at most every 5 seconds."""
+    global _last_redis_check_ts, _redis_is_online, _shared_redis_client
+    now = time.time()
+    if (now - _last_redis_check_ts) > 5.0 or _shared_redis_client is None:
+        _last_redis_check_ts = now
+        settings = get_settings()
+        try:
+            client = aioredis.from_url(
+                settings.redis_url, socket_timeout=0.05, decode_responses=True
+            )
+            await client.ping()
+            _shared_redis_client = client
+            _redis_is_online = True
+        except Exception:
+            _redis_is_online = False
+            _shared_redis_client = None
+    return _shared_redis_client if _redis_is_online else None
+
+
+async def _get_rate_limiter() -> RateLimiter:
+    """Returns configured rate limiter with resilient in-memory fallback."""
+    settings = get_settings()
+    r = await _get_active_redis()
+    if not r:
+        return _memory_limiter
+
+    if settings.relay_rate_limit_algorithm == "sliding_window":
+        primary: RateLimiter = SlidingWindowRateLimiter(redis_client=r)
+    else:
+        primary = TokenBucketRateLimiter(redis_client=r)
+    return ResilientRateLimiter(primary=primary, fallback=_memory_limiter)
+
+
+async def _update_ewma_latency(provider: str, latency_ms: float) -> None:
+    """Updates the Exponentially Weighted Moving Average (EWMA) latency in Redis if online."""
+    r = await _get_active_redis()
+    if not r:
+        return
+    try:
+        key = f"ewma:{provider}:latency"
+        old_val = await r.get(key)
+        alpha = 0.2
+        if old_val:
+            new_ewma = (alpha * latency_ms) + ((1.0 - alpha) * float(old_val))
+        else:
+            new_ewma = latency_ms
+        await r.set(key, str(new_ewma), ex=3600)
+    except Exception:
+        pass
 
 
 @router.get("/models", summary="List Available Model Aliases")
@@ -63,11 +138,68 @@ async def create_chat_completion(
     api_key: Annotated[ApiKeyRecord, Depends(get_current_api_key)],
     model_router: Annotated[Router, Depends(get_router)],
 ) -> Response:
-    """Handles chat completions with automatic failover, retries, and circuit breaking."""
+    """Handles chat completions with routing, caching, rate limiting, and failover."""
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     event_bus = get_event_bus()
+    cache = get_response_cache()
 
-    # 1. Validate Model Alias Permissions
+    # 1. Rate Limiting Check (RPM and TPM)
+    limiter = await _get_rate_limiter()
+    rpm_res = await limiter.check_and_consume(
+        key_id=api_key.id,
+        limit_type="rpm",
+        limit=api_key.rpm_limit,
+        cost=1,
+    )
+    if not rpm_res.allowed:
+        headers = {
+            "Retry-After": str(rpm_res.retry_after),
+            "X-RateLimit-Limit-Requests": str(rpm_res.limit),
+            "X-RateLimit-Remaining-Requests": "0",
+            "X-RateLimit-Reset-Requests": str(rpm_res.reset_seconds),
+        }
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers=headers,
+            detail={
+                "error": {
+                    "message": f"Rate limit exceeded (requests per minute). Please retry after {rpm_res.retry_after} seconds.",
+                    "type": "requests",
+                    "code": 429,
+                }
+            },
+        )
+
+    # Estimate prompt tokens for TPM limit
+    est_prompt_tokens = max(
+        1, int(sum(len(m.content.split()) for m in request_body.messages) * 1.3)
+    )
+    tpm_res = await limiter.check_and_consume(
+        key_id=api_key.id,
+        limit_type="tpm",
+        limit=api_key.tpm_limit,
+        cost=est_prompt_tokens,
+    )
+    if not tpm_res.allowed:
+        headers = {
+            "Retry-After": str(tpm_res.retry_after),
+            "X-RateLimit-Limit-Tokens": str(tpm_res.limit),
+            "X-RateLimit-Remaining-Tokens": "0",
+            "X-RateLimit-Reset-Tokens": str(tpm_res.reset_seconds),
+        }
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers=headers,
+            detail={
+                "error": {
+                    "message": f"Rate limit exceeded (tokens per minute). Please retry after {tpm_res.retry_after} seconds.",
+                    "type": "tokens",
+                    "code": 429,
+                }
+            },
+        )
+
+    # 2. Validate Model Alias Permissions
     allowed = api_key.allowed_aliases
     if "*" not in allowed and request_body.model not in allowed:
         raise HTTPException(
@@ -81,7 +213,7 @@ async def create_chat_completion(
             },
         )
 
-    # 2. Check Alias in Router
+    # 3. Check Alias in Router
     alias_cfg = model_router.get_alias(request_body.model)
     if not alias_cfg:
         raise HTTPException(
@@ -96,16 +228,106 @@ async def create_chat_completion(
             },
         )
 
-    # 3. Determine Circuit Breaker Status of all targets
+    # 4. Check Cache & Request Coalescing
+    cache_control = request.headers.get("Cache-Control")
+    can_cache = should_cache_request(request_body, cache_control)
+    cache_key = build_cache_key(request_body.model, request_body) if can_cache else ""
+    is_leader = True
+
+    if can_cache and cache_key:
+        cached = await cache.get(cache_key)
+        if cached:
+            # Immediate Cache Hit
+            if not request_body.stream:
+                resp_obj = ChatCompletionResponse(
+                    id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                    created=int(time.time()),
+                    model=request_body.model,
+                    choices=[
+                        ChatCompletionChoice(
+                            index=0,
+                            message=ChatMessage(role="assistant", content=cached.content),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=TokenUsage(
+                        prompt_tokens=cached.prompt_tokens,
+                        completion_tokens=cached.completion_tokens,
+                        total_tokens=cached.prompt_tokens + cached.completion_tokens,
+                    ),
+                )
+                headers = {
+                    "X-Relay-Request-Id": request_id,
+                    "X-Relay-Provider": "cache",
+                    "X-Relay-Cache": "HIT",
+                    "X-Relay-Attempts": "0",
+                    "X-Relay-Latency-Ms": "1.50",
+                }
+                return JSONResponse(content=resp_obj.model_dump(), headers=headers)
+            else:
+                headers = {
+                    "X-Relay-Request-Id": request_id,
+                    "X-Relay-Provider": "cache",
+                    "X-Relay-Cache": "HIT",
+                    "X-Relay-Attempts": "0",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                }
+                return StreamingResponse(
+                    cache.stream_cached_response(cached, request_body.model, request_id),
+                    media_type="text/event-stream",
+                    headers=headers,
+                )
+
+        # Single-flight request coalescing
+        is_leader, coalesce_event = cache.acquire_single_flight(cache_key)
+        if not is_leader:
+            # Wait for leader to populate cache
+            await coalesce_event.wait()
+            cached_coalesced = await cache.get(cache_key)
+            if cached_coalesced:
+                if not request_body.stream:
+                    resp_obj = ChatCompletionResponse(
+                        id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                        created=int(time.time()),
+                        model=request_body.model,
+                        choices=[
+                            ChatCompletionChoice(
+                                index=0,
+                                message=ChatMessage(
+                                    role="assistant", content=cached_coalesced.content
+                                ),
+                                finish_reason="stop",
+                            )
+                        ],
+                        usage=TokenUsage(
+                            prompt_tokens=cached_coalesced.prompt_tokens,
+                            completion_tokens=cached_coalesced.completion_tokens,
+                            total_tokens=cached_coalesced.prompt_tokens
+                            + cached_coalesced.completion_tokens,
+                        ),
+                    )
+                    headers = {
+                        "X-Relay-Request-Id": request_id,
+                        "X-Relay-Provider": "cache",
+                        "X-Relay-Cache": "HIT",
+                        "X-Relay-Attempts": "0",
+                        "X-Relay-Latency-Ms": "2.00",
+                    }
+                    return JSONResponse(content=resp_obj.model_dump(), headers=headers)
+
+    # 5. Determine Circuit Breaker Status of all targets
     open_circuits: set[str] = set()
     for t in alias_cfg.targets:
         cb = get_circuit_breaker(t.provider)
         if await cb.get_state() == CircuitState.OPEN:
             open_circuits.add(t.provider)
 
-    # 4. Plan Candidates based on routing strategy (excluding OPEN circuits)
+    # 6. Plan Candidates based on routing strategy (excluding OPEN circuits)
     targets = model_router.plan_targets(request_body.model, open_circuit_providers=open_circuits)
     if not targets:
+        if can_cache and cache_key and is_leader:
+            cache.release_single_flight(cache_key)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             headers={"Retry-After": "10"},
@@ -121,278 +343,293 @@ async def create_chat_completion(
     start_time = time.perf_counter()
 
     # ==========================================================================
-    # 5. Non-Streaming Execution with Transparent Failover
+    # 7. Non-Streaming Execution with Transparent Failover
     # ==========================================================================
     if not request_body.stream:
         last_error: Exception | None = None
         attempt_count = 0
 
-        for target in targets:
-            attempt_count += 1
-            cb = get_circuit_breaker(target.provider)
-            sem = _get_semaphore(target.provider)
+        try:
+            for target in targets:
+                attempt_count += 1
+                cb = get_circuit_breaker(target.provider)
+                sem = _get_semaphore(target.provider)
 
-            # Enforce provider concurrency limit
-            if sem.locked():
-                # If saturated, move to next target
-                logger.warning(
-                    "Provider '%s' semaphore saturated, attempting failover", target.provider
-                )
-                continue
+                if sem.locked():
+                    logger.warning(
+                        "Provider '%s' semaphore saturated, attempting failover", target.provider
+                    )
+                    continue
 
-            try:
-                async with sem:
-                    provider = get_provider(target.provider)
-                    resp = await provider.complete(request_body, target.model)
+                try:
+                    async with sem:
+                        provider = get_provider(target.provider)
+                        resp = await provider.complete(request_body, target.model)
 
-                # Record success on circuit breaker
-                await cb.record_success()
+                    await cb.record_success()
+                    total_latency_ms = (time.perf_counter() - start_time) * 1000.0
+                    await _update_ewma_latency(target.provider, total_latency_ms)
 
-                total_latency_ms = (time.perf_counter() - start_time) * 1000.0
-                completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-                created_ts = int(time.time())
+                    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+                    created_ts = int(time.time())
 
-                response_obj = ChatCompletionResponse(
-                    id=completion_id,
-                    created=created_ts,
-                    model=request_body.model,
-                    choices=[
-                        ChatCompletionChoice(
-                            index=0,
-                            message=ChatMessage(role="assistant", content=resp.content),
-                            finish_reason="stop",
+                    response_obj = ChatCompletionResponse(
+                        id=completion_id,
+                        created=created_ts,
+                        model=request_body.model,
+                        choices=[
+                            ChatCompletionChoice(
+                                index=0,
+                                message=ChatMessage(role="assistant", content=resp.content),
+                                finish_reason="stop",
+                            )
+                        ],
+                        usage=TokenUsage(
+                            prompt_tokens=resp.prompt_tokens,
+                            completion_tokens=resp.completion_tokens,
+                            total_tokens=resp.prompt_tokens + resp.completion_tokens,
+                        ),
+                    )
+
+                    cost_usd = (
+                        resp.prompt_tokens / 1_000_000.0
+                    ) * target.cost_input_per_million + (
+                        resp.completion_tokens / 1_000_000.0
+                    ) * target.cost_output_per_million
+
+                    # Store in response cache if eligible
+                    if can_cache and cache_key:
+                        entry = CachedEntry(
+                            content=resp.content,
+                            model=request_body.model,
+                            prompt_tokens=resp.prompt_tokens,
+                            completion_tokens=resp.completion_tokens,
+                            raw_response=response_obj.model_dump(),
                         )
-                    ],
-                    usage=TokenUsage(
-                        prompt_tokens=resp.prompt_tokens,
-                        completion_tokens=resp.completion_tokens,
-                        total_tokens=resp.prompt_tokens + resp.completion_tokens,
-                    ),
-                )
+                        await cache.set(cache_key, entry)
 
-                cost_usd = (resp.prompt_tokens / 1_000_000.0) * target.cost_input_per_million + (
-                    resp.completion_tokens / 1_000_000.0
-                ) * target.cost_output_per_million
-
-                # Asynchronously queue log record
-                log_record = RequestLogRecord(
-                    id=request_id,
-                    timestamp=datetime.now(UTC).isoformat(),
-                    api_key_id=api_key.id,
-                    alias=request_body.model,
-                    provider=target.provider,
-                    upstream_model=target.model,
-                    status=200,
-                    attempts=attempt_count,
-                    cache_status="MISS",
-                    latency_ms=total_latency_ms,
-                    ttft_ms=resp.ttft_ms,
-                    tokens_in=resp.prompt_tokens,
-                    tokens_out=resp.completion_tokens,
-                    cost_usd=cost_usd,
-                    error_type=None,
-                )
-                get_log_writer().enqueue(log_record)
-
-                # Emit completion event
-                await event_bus.publish(
-                    RelayEvent(
-                        event_type="request.completed",
-                        data={
-                            "id": request_id,
-                            "alias": request_body.model,
-                            "provider": target.provider,
-                            "latency_ms": round(total_latency_ms, 2),
-                            "attempts": attempt_count,
-                            "cost_usd": cost_usd,
-                            "cache_status": "MISS",
-                            "status": 200,
-                        },
+                    # Asynchronously queue log record
+                    log_record = RequestLogRecord(
+                        id=request_id,
+                        timestamp=datetime.now(UTC).isoformat(),
+                        api_key_id=api_key.id,
+                        alias=request_body.model,
+                        provider=target.provider,
+                        upstream_model=target.model,
+                        status=200,
+                        attempts=attempt_count,
+                        cache_status="MISS",
+                        latency_ms=total_latency_ms,
+                        ttft_ms=resp.ttft_ms,
+                        tokens_in=resp.prompt_tokens,
+                        tokens_out=resp.completion_tokens,
+                        cost_usd=cost_usd,
+                        error_type=None,
                     )
-                )
+                    get_log_writer().enqueue(log_record)
 
-                headers = {
-                    "X-Relay-Request-Id": request_id,
-                    "X-Relay-Provider": target.provider,
-                    "X-Relay-Cache": "MISS",
-                    "X-Relay-Attempts": str(attempt_count),
-                    "X-Relay-Latency-Ms": f"{total_latency_ms:.2f}",
-                }
-                return JSONResponse(content=response_obj.model_dump(), headers=headers)
-
-            except Exception as e:
-                last_error = e
-                await cb.record_failure(e)
-                logger.warning(
-                    "Target provider '%s' failed on attempt %d: %s. Initiating failover.",
-                    target.provider,
-                    attempt_count,
-                    e,
-                )
-                # Emit failover event
-                await event_bus.publish(
-                    RelayEvent(
-                        event_type="failover",
-                        data={
-                            "id": request_id,
-                            "failed_provider": target.provider,
-                            "error": str(e),
-                            "attempt": attempt_count,
-                        },
+                    await event_bus.publish(
+                        RelayEvent(
+                            event_type="request.completed",
+                            data={
+                                "id": request_id,
+                                "alias": request_body.model,
+                                "provider": target.provider,
+                                "latency_ms": round(total_latency_ms, 2),
+                                "attempts": attempt_count,
+                                "cost_usd": cost_usd,
+                                "cache_status": "MISS",
+                                "status": 200,
+                            },
+                        )
                     )
-                )
-                # If error is not retryable, do not continue trying
-                if not is_retryable_error(e):
-                    break
 
-        # All targets failed
-        total_latency_ms = (time.perf_counter() - start_time) * 1000.0
-        logger.error(
-            "All candidate targets exhausted for alias '%s'. Last error: %s",
-            request_body.model,
-            last_error,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error": {
-                    "message": f"All upstream providers failed. Last error: {last_error}",
-                    "type": "bad_gateway",
-                    "code": 502,
-                }
-            },
-        )
+                    headers = {
+                        "X-Relay-Request-Id": request_id,
+                        "X-Relay-Provider": target.provider,
+                        "X-Relay-Cache": "MISS",
+                        "X-Relay-Attempts": str(attempt_count),
+                        "X-Relay-Latency-Ms": f"{total_latency_ms:.2f}",
+                    }
+                    return JSONResponse(content=response_obj.model_dump(), headers=headers)
+
+                except Exception as e:
+                    last_error = e
+                    await cb.record_failure(e)
+                    logger.warning(
+                        "Target provider '%s' failed on attempt %d: %s. Initiating failover.",
+                        target.provider,
+                        attempt_count,
+                        e,
+                    )
+                    await event_bus.publish(
+                        RelayEvent(
+                            event_type="failover",
+                            data={
+                                "id": request_id,
+                                "failed_provider": target.provider,
+                                "error": str(e),
+                                "attempt": attempt_count,
+                            },
+                        )
+                    )
+                    if not is_retryable_error(e):
+                        break
+
+            # All targets exhausted
+            total_latency_ms = (time.perf_counter() - start_time) * 1000.0
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error": {
+                        "message": f"All upstream providers failed. Last error: {last_error}",
+                        "type": "bad_gateway",
+                        "code": 502,
+                    }
+                },
+            )
+        finally:
+            if can_cache and cache_key and is_leader:
+                cache.release_single_flight(cache_key)
 
     # ==========================================================================
-    # 6. Streaming Execution with Transparent Pre-Token Failover
+    # 8. Streaming Execution with Transparent Pre-Token Failover
     # ==========================================================================
     async def sse_event_generator() -> AsyncIterator[str]:
         prompt_tokens = max(1, sum(len(m.content.split()) for m in request_body.messages))
         completion_tokens = 0
         ttft_recorded: float | None = None
         attempt_count = 0
+        collected_chunks_text: list[str] = []
 
-        # Iterate through target candidates until we successfully connect and yield the first token
-        for target in targets:
-            attempt_count += 1
-            cb = get_circuit_breaker(target.provider)
-            provider = get_provider(target.provider)
-            stream_iter = provider.stream(request_body, target.model)
+        try:
+            for target in targets:
+                attempt_count += 1
+                cb = get_circuit_breaker(target.provider)
+                provider = get_provider(target.provider)
+                stream_iter = provider.stream(request_body, target.model)
 
-            first_chunk = None
-            try:
-                # Pre-first-token phase: attempt to receive the initial chunk
-                first_chunk = await stream_iter.__anext__()
-            except (
-                ConnectionError,
-                ConnectionResetError,
-                RuntimeError,
-                TimeoutError,
-                Exception,
-            ) as e:
-                # Failed before first token: transparently fall over to next target!
-                await cb.record_failure(e)
-                logger.warning(
-                    "Streaming pre-token failure on '%s' (attempt %d): %s. Failing over.",
-                    target.provider,
-                    attempt_count,
-                    e,
-                )
-                await event_bus.publish(
-                    RelayEvent(
-                        event_type="failover",
-                        data={
-                            "id": request_id,
-                            "failed_provider": target.provider,
-                            "error": str(e),
-                            "attempt": attempt_count,
-                        },
+                first_chunk = None
+                try:
+                    # Pre-first-token phase
+                    first_chunk = await stream_iter.__anext__()
+                except Exception as e:
+                    await cb.record_failure(e)
+                    logger.warning(
+                        "Streaming pre-token failure on '%s' (attempt %d): %s. Failing over.",
+                        target.provider,
+                        attempt_count,
+                        e,
                     )
-                )
-                continue
-
-            # We successfully received the first chunk!
-            ttft_recorded = (time.perf_counter() - start_time) * 1000.0
-            yield f"data: {first_chunk.model_dump_json()}\n\n"
-
-            # Mid-stream phase: yield subsequent chunks
-            try:
-                async for chunk in stream_iter:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        completion_tokens += 1
-                    yield f"data: {chunk.model_dump_json()}\n\n"
-
-                # Stream completed successfully
-                yield "data: [DONE]\n\n"
-                await cb.record_success()
-
-                total_latency_ms = (time.perf_counter() - start_time) * 1000.0
-                cost_usd = (prompt_tokens / 1_000_000.0) * target.cost_input_per_million + (
-                    completion_tokens / 1_000_000.0
-                ) * target.cost_output_per_million
-
-                log_record = RequestLogRecord(
-                    id=request_id,
-                    timestamp=datetime.now(UTC).isoformat(),
-                    api_key_id=api_key.id,
-                    alias=request_body.model,
-                    provider=target.provider,
-                    upstream_model=target.model,
-                    status=200,
-                    attempts=attempt_count,
-                    cache_status="MISS",
-                    latency_ms=total_latency_ms,
-                    ttft_ms=ttft_recorded,
-                    tokens_in=prompt_tokens,
-                    tokens_out=completion_tokens,
-                    cost_usd=cost_usd,
-                    error_type=None,
-                )
-                get_log_writer().enqueue(log_record)
-
-                await event_bus.publish(
-                    RelayEvent(
-                        event_type="request.completed",
-                        data={
-                            "id": request_id,
-                            "alias": request_body.model,
-                            "provider": target.provider,
-                            "latency_ms": round(total_latency_ms, 2),
-                            "attempts": attempt_count,
-                            "cost_usd": cost_usd,
-                            "cache_status": "MISS",
-                            "status": 200,
-                        },
+                    await event_bus.publish(
+                        RelayEvent(
+                            event_type="failover",
+                            data={
+                                "id": request_id,
+                                "failed_provider": target.provider,
+                                "error": str(e),
+                                "attempt": attempt_count,
+                            },
+                        )
                     )
-                )
-                return
+                    continue
 
-            except Exception as e:
-                # Mid-stream failure: cannot transparently switch providers.
-                # Must emit terminal SSE error event, record failure, and end stream.
-                logger.error("Mid-stream failure on provider '%s': %s", target.provider, e)
-                await cb.record_failure(e)
-                error_event = {
-                    "error": {
-                        "message": f"Upstream provider connection terminated mid-stream: {e}",
-                        "type": "upstream_error",
-                        "code": 502,
+                # Yield initial chunk
+                ttft_recorded = (time.perf_counter() - start_time) * 1000.0
+                yield f"data: {first_chunk.model_dump_json()}\n\n"
+
+                # Mid-stream phase
+                try:
+                    async for chunk in stream_iter:
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            completion_tokens += 1
+                            collected_chunks_text.append(chunk.choices[0].delta.content)
+                        yield f"data: {chunk.model_dump_json()}\n\n"
+
+                    yield "data: [DONE]\n\n"
+                    await cb.record_success()
+
+                    total_latency_ms = (time.perf_counter() - start_time) * 1000.0
+                    await _update_ewma_latency(target.provider, total_latency_ms)
+
+                    cost_usd = (prompt_tokens / 1_000_000.0) * target.cost_input_per_million + (
+                        completion_tokens / 1_000_000.0
+                    ) * target.cost_output_per_million
+
+                    # Cache streamed result
+                    if can_cache and cache_key:
+                        full_content = "".join(collected_chunks_text)
+                        entry = CachedEntry(
+                            content=full_content,
+                            model=request_body.model,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            raw_response={},
+                        )
+                        await cache.set(cache_key, entry)
+
+                    log_record = RequestLogRecord(
+                        id=request_id,
+                        timestamp=datetime.now(UTC).isoformat(),
+                        api_key_id=api_key.id,
+                        alias=request_body.model,
+                        provider=target.provider,
+                        upstream_model=target.model,
+                        status=200,
+                        attempts=attempt_count,
+                        cache_status="MISS",
+                        latency_ms=total_latency_ms,
+                        ttft_ms=ttft_recorded,
+                        tokens_in=prompt_tokens,
+                        tokens_out=completion_tokens,
+                        cost_usd=cost_usd,
+                        error_type=None,
+                    )
+                    get_log_writer().enqueue(log_record)
+
+                    await event_bus.publish(
+                        RelayEvent(
+                            event_type="request.completed",
+                            data={
+                                "id": request_id,
+                                "alias": request_body.model,
+                                "provider": target.provider,
+                                "latency_ms": round(total_latency_ms, 2),
+                                "attempts": attempt_count,
+                                "cost_usd": cost_usd,
+                                "cache_status": "MISS",
+                                "status": 200,
+                            },
+                        )
+                    )
+                    return
+
+                except Exception as e:
+                    logger.error("Mid-stream failure on provider '%s': %s", target.provider, e)
+                    await cb.record_failure(e)
+                    error_event = {
+                        "error": {
+                            "message": f"Upstream provider connection terminated mid-stream: {e}",
+                            "type": "upstream_error",
+                            "code": 502,
+                        }
                     }
-                }
-                yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
+                    yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
 
-        # If all candidates failed before yielding any token
-        error_event = {
-            "error": {
-                "message": "All candidate providers failed prior to initial token generation.",
-                "type": "service_unavailable",
-                "code": 503,
+            error_event = {
+                "error": {
+                    "message": "All candidate providers failed prior to initial token generation.",
+                    "type": "service_unavailable",
+                    "code": 503,
+                }
             }
-        }
-        yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
-        yield "data: [DONE]\n\n"
+            yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            if can_cache and cache_key and is_leader:
+                cache.release_single_flight(cache_key)
 
     response_headers = {
         "X-Relay-Request-Id": request_id,
