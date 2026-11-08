@@ -7,10 +7,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from relay.api.health import router as health_router
+from relay.api.openai_compat import router as openai_router
 from relay.config import get_settings
 from relay.db import get_log_writer, init_db
 
@@ -61,7 +64,7 @@ def create_app() -> FastAPI:
     )
 
     @app.middleware("http")
-    async def request_context_middleware(request: Request, call_next: Any) -> Response:  # type: ignore
+    async def request_context_middleware(request: Request, call_next: Any) -> Response:
         """Attaches a unique Request ID and tracks request duration."""
         request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
         request.state.request_id = request_id
@@ -74,8 +77,45 @@ def create_app() -> FastAPI:
         response.headers["X-Relay-Latency-Ms"] = f"{duration_ms:.2f}"
         return response
 
+    # Standardize HTTP exception responses into OpenAI error shape
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+        detail = exc.detail
+        if isinstance(detail, dict) and "error" in detail:
+            content = detail
+        else:
+            content = {
+                "error": {
+                    "message": str(detail),
+                    "type": "invalid_request_error" if exc.status_code < 500 else "api_error",
+                    "code": exc.status_code,
+                }
+            }
+        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
+
+    # Standardize Request validation errors (422) into OpenAI error shape
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        first_err = exc.errors()[0] if exc.errors() else {}
+        loc = ".".join(str(p) for p in first_err.get("loc", []))
+        msg = first_err.get("msg", "Validation error")
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "error": {
+                    "message": f"Validation error at {loc}: {msg}",
+                    "type": "invalid_request_error",
+                    "param": loc,
+                    "code": "validation_error",
+                }
+            },
+        )
+
     # Mount routers
     app.include_router(health_router)
+    app.include_router(openai_router)
 
     return app
 
