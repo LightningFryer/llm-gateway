@@ -18,7 +18,7 @@ class RetryConfig:
     jitter: bool = True
 
 
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 529}
 NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404, 422}
 
 
@@ -30,6 +30,10 @@ def is_retryable_error(exc_or_status: Exception | int) -> bool:
     """
     if isinstance(exc_or_status, int):
         return exc_or_status in RETRYABLE_STATUS_CODES
+
+    # Normalized provider errors with explicit retry flag
+    if hasattr(exc_or_status, "is_retryable"):
+        return bool(exc_or_status.is_retryable)
 
     if isinstance(
         exc_or_status,

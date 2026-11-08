@@ -93,3 +93,20 @@ This document records the architectural and engineering decisions made during th
   - *Arithmetic mean over last N requests*: Requires maintaining a sliding window array in Redis, consuming more memory and reacting slowly to sudden latency spikes.
   - *Instantaneous latency of last request*: Highly volatile; a single transient blip would unnecessarily divert all subsequent traffic.
 - **Tradeoffs**: EWMA requires tuning the smoothing factor $\alpha$, but maintains $O(1)$ constant storage in Redis while reacting swiftly to upstream latency shifts.
+
+---
+
+## ADR-009: Normalized Provider Adapters with Zero-Key Offline Mock Fallback
+
+- **Context**: Relay must support multiple real-world upstream LLM providers (OpenAI, Anthropic Claude, Google Gemini) which differ radically in wire protocol (endpoints, headers, message structures, system prompt placements, stop reason strings, streaming SSE events). At the same time, Relay must run, test, and demo completely offline with zero API keys required.
+- **Decision**:
+  1. Build dedicated adapter classes (`OpenAIProvider`, `AnthropicProvider`, `GeminiProvider`) extending the common `Provider` interface.
+  2. Map incoming OpenAI-standard requests to vendor-specific wire formats (e.g., Anthropic top-level `system` string and role filtering; Gemini `contents` and `systemInstruction`).
+  3. Map vendor-specific responses and streaming SSE events back to uniform `ProviderResponse` and `ChatCompletionChunk` objects.
+  4. Catch all transport (`httpx`) errors and normalize into `RelayProviderError` with unified `status_code` and `is_retryable` flag (handling vendor-specific status codes like Anthropic 529 Overloaded).
+  5. If vendor API keys are not supplied in the environment, any request targeted to that provider automatically falls back to a simulated `MockProvider`, allowing full local verification without network calls or external credentials.
+- **Alternatives Considered**:
+  - *Using LiteLLM or LangChain as an adapter library*: Would add heavy dependencies, obscure the protocol translation, and violate the project rule to keep dependencies minimal and code easily understandable for CS students.
+  - *Requiring real API keys to run*: Breaks offline portability and test execution in isolated CI environments.
+- **Tradeoffs**: Requires maintaining custom translation code for OpenAI, Anthropic, and Gemini schemas, but yields full transparency, zero bloat, and guaranteed offline testability.
+

@@ -99,6 +99,25 @@ class ProviderResponse:
     raw_response: dict[str, Any] = field(default_factory=dict)
 
 
+class RelayProviderError(Exception):
+    """Normalized exception raised by upstream LLM providers."""
+
+    def __init__(
+        self,
+        provider: str,
+        message: str,
+        status_code: int = 500,
+        is_retryable: bool = False,
+        raw_error: Any = None,
+    ) -> None:
+        super().__init__(f"[{provider}] {message} (status={status_code})")
+        self.provider = provider
+        self.message = message
+        self.status_code = status_code
+        self.is_retryable = is_retryable
+        self.raw_error = raw_error
+
+
 class Provider(ABC):
     """Abstract base class that all provider adapters (Mock, OpenAI, Anthropic, Gemini) implement."""
 
