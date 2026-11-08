@@ -1,0 +1,55 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: relay-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    container_name: relay-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - RELAY_HOST=0.0.0.0
+      - RELAY_PORT=8000
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_PATH=/data/relay.db
+      - RELAY_ADMIN_KEY=relay_admin_secret_key_12345
+      - RELAY_CONFIG_PATH=config/models.yaml
+    volumes:
+      - relay-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: relay-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8000
+      - NEXT_PUBLIC_ADMIN_KEY=relay_admin_secret_key_12345
+    depends_on:
+      - gateway
+
+volumes:
+  redis-data:
+  relay-data:

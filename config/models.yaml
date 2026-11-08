@@ -1,0 +1,68 @@
+# Relay Model Alias and Routing Configuration
+# Maps user-facing model aliases to ordered lists of upstream provider targets.
+
+aliases:
+  fast:
+    strategy: lowest_latency
+    description: "Low-latency target chain optimized for fast completions"
+    targets:
+      - provider: mock-a
+        model: mock-gpt-4o-mini
+        weight: 1
+        cost_input_per_million: 0.15
+        cost_output_per_million: 0.60
+      - provider: mock-b
+        model: mock-claude-3-haiku
+        weight: 1
+        cost_input_per_million: 0.25
+        cost_output_per_million: 1.25
+
+  smart:
+    strategy: priority
+    description: "High-reasoning target chain with priority fallback"
+    targets:
+      - provider: mock-a
+        model: mock-gpt-4o
+        weight: 1
+        cost_input_per_million: 2.50
+        cost_output_per_million: 10.00
+      - provider: mock-b
+        model: mock-claude-3-5-sonnet
+        weight: 1
+        cost_input_per_million: 3.00
+        cost_output_per_million: 15.00
+      - provider: mock-c
+        model: mock-gemini-1-5-pro
+        weight: 1
+        cost_input_per_million: 1.25
+        cost_output_per_million: 5.00
+
+  cheap:
+    strategy: lowest_cost
+    description: "Cost-optimized routing selecting the cheapest healthy provider"
+    targets:
+      - provider: mock-a
+        model: mock-gpt-4o-mini
+        weight: 1
+        cost_input_per_million: 0.15
+        cost_output_per_million: 0.60
+      - provider: mock-c
+        model: mock-gemini-1-5-flash
+        weight: 1
+        cost_input_per_million: 0.075
+        cost_output_per_million: 0.30
+
+  balanced:
+    strategy: round_robin
+    description: "Weighted round-robin distribution across flagship models"
+    targets:
+      - provider: mock-a
+        model: mock-gpt-4o
+        weight: 2
+        cost_input_per_million: 2.50
+        cost_output_per_million: 10.00
+      - provider: mock-b
+        model: mock-claude-3-5-sonnet
+        weight: 1
+        cost_input_per_million: 3.00
+        cost_output_per_million: 15.00
