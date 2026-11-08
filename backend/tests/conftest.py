@@ -1,5 +1,6 @@
 """Pytest fixtures for unit and integration testing."""
 
+import asyncio
 import os
 import tempfile
 from collections.abc import AsyncIterator, Iterator
@@ -8,8 +9,9 @@ import fakeredis.aioredis as fake_aioredis
 import pytest
 from fastapi.testclient import TestClient
 
+from relay.auth import generate_api_key
 from relay.config import Settings, get_settings
-from relay.db import init_db
+from relay.db import create_api_key, init_db
 
 
 @pytest.fixture
@@ -38,7 +40,6 @@ def fake_redis() -> AsyncIterator[fake_aioredis.FakeRedis]:
 def app_with_db(temp_db_path: str) -> Iterator[TestClient]:
     """Provides a TestClient wired with an initialized temporary database."""
 
-    # Override settings
     def get_test_settings() -> Settings:
         return Settings(
             database_path=temp_db_path,
@@ -49,12 +50,26 @@ def app_with_db(temp_db_path: str) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_settings] = get_test_settings
 
-    # Run DB init synchronously for test setup
-    import asyncio
-
     asyncio.run(init_db(temp_db_path))
 
     with TestClient(app) as client:
         yield client
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def auth_key(temp_db_path: str) -> tuple[str, str]:
+    """Creates a valid test API key in SQLite and returns (raw_key, key_id)."""
+    raw_key, key_hash, prefix = generate_api_key()
+    asyncio.run(init_db(temp_db_path))
+    rec = asyncio.run(
+        create_api_key(
+            db_path=temp_db_path,
+            name="Test Suite Key",
+            key_hash=key_hash,
+            key_prefix=prefix,
+            allowed_aliases=["*"],
+        )
+    )
+    return raw_key, rec.id

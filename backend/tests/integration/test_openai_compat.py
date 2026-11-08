@@ -1,31 +1,9 @@
 """Integration tests for OpenAI-compatible endpoints and official SDK compatibility."""
 
-import asyncio
-
 import httpx
 import openai
 import pytest
 from fastapi.testclient import TestClient
-
-from relay.auth import generate_api_key
-from relay.db import create_api_key, init_db
-
-
-@pytest.fixture
-def auth_key(temp_db_path: str) -> tuple[str, str]:
-    """Creates a valid test API key in SQLite and returns (raw_key, key_id)."""
-    raw_key, key_hash, prefix = generate_api_key()
-    asyncio.run(init_db(temp_db_path))
-    rec = asyncio.run(
-        create_api_key(
-            db_path=temp_db_path,
-            name="Test Suite Key",
-            key_hash=key_hash,
-            key_prefix=prefix,
-            allowed_aliases=["*"],
-        )
-    )
-    return raw_key, rec.id
 
 
 def test_unauthorized_request(app_with_db: TestClient) -> None:
