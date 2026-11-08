@@ -19,7 +19,6 @@ from relay.config import get_settings
 from relay.db import get_log_writer, init_db
 from relay.events import get_event_bus
 from relay.metrics import get_metrics_content
-from relay.providers import init_real_providers
 
 # Configure structured JSON / standard logging
 logging.basicConfig(
@@ -37,9 +36,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize SQLite schema and enable WAL mode
     await init_db(settings.database_path)
-
-    # Initialize configured real LLM providers
-    init_real_providers(settings)
 
     # Start off-the-hot-path background log batch writer
     log_writer = get_log_writer(settings.database_path)

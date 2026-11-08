@@ -292,3 +292,4 @@ No ORM or migrations. Created with `CREATE TABLE IF NOT EXISTS` at startup in WA
 
 - **M8: Stretch goals.**
   - Prometheus and Grafana provisioned dashboard in `deploy/`.
+

@@ -300,10 +300,24 @@ async def get_stats(
     recent_logs = await get_recent_logs(settings.database_path, limit=20)
     provider_usage = await get_usage_by_provider(settings.database_path)
 
+    total_reqs = summary.get("total_requests", 0)
+    error_count = summary.get("error_count", 0)
+    spend_today = summary.get("spend_today_usd", summary.get("spend_today", 0.0))
+    hit_rate = summary.get("cache_hit_rate", 0.0)
+    avg_lat = summary.get("avg_latency_ms", summary.get("avg_latency", 0.0)) or 0.0
+
     return {
+        "total_requests": total_reqs,
+        "total_cost_usd": spend_today,
+        "requests_24h": total_reqs,
+        "errors_24h": error_count,
+        "spend_24h_usd": spend_today,
+        "cache_hit_rate": hit_rate,
+        "p95_latency_ms": avg_lat,
         "summary": summary,
         "recent_logs": recent_logs,
         "provider_usage": provider_usage,
+        "top_keys_by_spend": [],
     }
 
 

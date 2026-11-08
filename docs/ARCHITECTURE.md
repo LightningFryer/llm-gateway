@@ -186,3 +186,4 @@ sequenceDiagram
 - `cache:resp:{sha256}`: Serialized JSON response with TTL expiration.
 - `ewma:latency:{provider}`: Float string of exponentially weighted moving average latency.
 - `relay:events`: Pub/Sub channel for live dashboard event streaming.
+

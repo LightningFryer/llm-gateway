@@ -52,8 +52,8 @@ export default function AnalyticsPage() {
   const topKeysData =
     stats?.top_keys_by_spend?.map((k) => ({
       name: k.name || k.key_prefix,
-      spend: parseFloat(k.spend_usd.toFixed(4)),
-      requests: k.requests,
+      spend: parseFloat((k.spend_usd ?? 0).toFixed(4)),
+      requests: k.requests ?? 0,
     })) || [];
 
   return (
@@ -76,7 +76,7 @@ export default function AnalyticsPage() {
             <DollarSign className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-amber-400">
-            ${stats ? stats.total_cost_usd.toFixed(4) : "0.0000"}
+            ${stats?.total_cost_usd !== undefined ? stats.total_cost_usd.toFixed(4) : "0.0000"}
           </div>
           <div className="text-[11px] text-gray-500 mt-1">All time</div>
         </div>
@@ -87,7 +87,7 @@ export default function AnalyticsPage() {
             <Coins className="w-4 h-4 text-blue-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
-            ${stats ? stats.spend_24h_usd.toFixed(4) : "0.0000"}
+            ${stats?.spend_24h_usd !== undefined ? stats.spend_24h_usd.toFixed(4) : "0.0000"}
           </div>
           <div className="text-[11px] text-gray-500 mt-1">Last 24 hours</div>
         </div>
@@ -98,7 +98,7 @@ export default function AnalyticsPage() {
             <Database className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-emerald-400">
-            {stats ? (stats.cache_hit_rate * 100).toFixed(1) : "0.0"}%
+            {stats?.cache_hit_rate !== undefined ? (stats.cache_hit_rate * 100).toFixed(1) : "0.0"}%
           </div>
           <div className="text-[11px] text-gray-500 mt-1">Cost savings</div>
         </div>
@@ -109,7 +109,7 @@ export default function AnalyticsPage() {
             <Gauge className="w-4 h-4 text-purple-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-purple-300">
-            {stats ? Math.round(stats.p95_latency_ms) : 0} ms
+            {stats?.p95_latency_ms !== undefined ? Math.round(stats.p95_latency_ms) : 0} ms
           </div>
           <div className="text-[11px] text-gray-500 mt-1">95th percentile</div>
         </div>
@@ -219,3 +219,4 @@ export default function AnalyticsPage() {
     </div>
   );
 }
+

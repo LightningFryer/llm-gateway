@@ -158,11 +158,11 @@ export default function LiveOverviewPage() {
   }));
 
   const errorRatePercent =
-    stats && stats.requests_24h > 0
-      ? ((stats.errors_24h / stats.requests_24h) * 100).toFixed(1)
+    stats && (stats.requests_24h ?? 0) > 0
+      ? (((stats.errors_24h ?? 0) / stats.requests_24h) * 100).toFixed(1)
       : "0.0";
 
-  const cacheHitPercent = stats
+  const cacheHitPercent = stats && stats.cache_hit_rate !== undefined
     ? (stats.cache_hit_rate * 100).toFixed(1)
     : "0.0";
 
@@ -207,10 +207,10 @@ export default function LiveOverviewPage() {
             <Activity className="w-4 h-4 text-blue-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
-            {stats ? stats.total_requests.toLocaleString() : "..."}
+            {stats && stats.total_requests !== undefined ? stats.total_requests.toLocaleString() : "0"}
           </div>
           <div className="text-[11px] text-gray-500 mt-1">
-            24h: {stats ? stats.requests_24h.toLocaleString() : "0"}
+            24h: {stats && stats.requests_24h !== undefined ? stats.requests_24h.toLocaleString() : "0"}
           </div>
         </div>
 
@@ -224,7 +224,7 @@ export default function LiveOverviewPage() {
             {errorRatePercent}%
           </div>
           <div className="text-[11px] text-gray-500 mt-1">
-            {stats ? stats.errors_24h : 0} errors logged
+            {stats?.errors_24h ?? 0} errors logged
           </div>
         </div>
 
@@ -247,7 +247,7 @@ export default function LiveOverviewPage() {
             <Gauge className="w-4 h-4 text-purple-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-white">
-            {stats ? Math.round(stats.p95_latency_ms) : 0}
+            {stats && stats.p95_latency_ms !== undefined ? Math.round(stats.p95_latency_ms) : 0}
             <span className="text-xs text-gray-500 ml-1">ms</span>
           </div>
           <div className="text-[11px] text-gray-500 mt-1">Moving 24h window</div>
@@ -260,10 +260,10 @@ export default function LiveOverviewPage() {
             <DollarSign className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-bold font-mono text-amber-400">
-            ${stats ? stats.total_cost_usd.toFixed(4) : "0.0000"}
+            ${stats && stats.total_cost_usd !== undefined ? stats.total_cost_usd.toFixed(4) : "0.0000"}
           </div>
           <div className="text-[11px] text-gray-500 mt-1">
-            24h: ${stats ? stats.spend_24h_usd.toFixed(4) : "0.0000"}
+            24h: ${stats && stats.spend_24h_usd !== undefined ? stats.spend_24h_usd.toFixed(4) : "0.0000"}
           </div>
         </div>
       </div>
@@ -492,3 +492,4 @@ export default function LiveOverviewPage() {
     </div>
   );
 }
+

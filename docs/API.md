@@ -190,3 +190,4 @@ Live Server-Sent Events stream emitting real-time gateway notifications:
 - `GET /healthz`: Basic liveness probe (`{"status":"ok","service":"relay"}`).
 - `GET /readyz`: Readiness probe checking SQLite database connectivity. Returns HTTP 503 if unhealthy.
 - `GET /metrics`: Standard Prometheus metrics exposition scraping target.
+

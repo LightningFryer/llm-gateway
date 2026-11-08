@@ -69,3 +69,4 @@ This script walks through the **flagship presentation moment** that proves Relay
 
 3. **"How does the gateway prevent cache stampedes when a popular query arrives simultaneously?"**
    > *"Relay uses single-flight request coalescing with in-memory `asyncio.Event` synchronization keyed by the SHA-256 prompt hash. The first request becomes the leader and queries upstream; all concurrent peers await the leader's event and share the result from cache, ensuring only one request ever hits upstream."*
+

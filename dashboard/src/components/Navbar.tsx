@@ -135,3 +135,4 @@ export function Navbar({ onOpenChaos, chaosCount = 0 }: NavbarProps) {
     </header>
   );
 }
+

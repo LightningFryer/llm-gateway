@@ -24,8 +24,6 @@ MANIFEST
 
 # Virtual environments
 .env
-.env.local
-*.env.local
 .venv
 env/
 venv/
@@ -64,3 +62,4 @@ relay-data/
 *.swo
 .DS_Store
 Thumbs.db
+

@@ -77,3 +77,4 @@ Verified using `backend/tests/integration/test_ratelimit_concurrency.py`:
 - **Token Bucket Algorithm**: Under high concurrent contention with 2 simulated gateway instances and 100 in-flight requests against a bucket of capacity 20, exactly **20 requests were permitted** and **80 requests were rejected with HTTP 429**.
 - **Sliding Window Log Algorithm**: Over a rolling 60-second window, exactly 15 requests out of 45 were permitted, strictly preventing boundary double-burst vulnerabilities.
 - **Latency Overhead**: The rate limiting check (atomic `MULTI/EXEC` pipeline) adds **< 0.8 ms** overhead to the gateway request path.
+

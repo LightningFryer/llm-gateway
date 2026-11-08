@@ -26,3 +26,4 @@ COPY --from=builder /app/src ./src
 EXPOSE 3000
 
 CMD ["npm", "run", "start"]
+

@@ -99,3 +99,4 @@ Whenever an interviewer asks you about the technical depth of this project, high
 - Real Performance Benchmarks: `docs/BENCHMARKS.md`
 - Architecture Decision Records (9 ADRs): `docs/DECISIONS.md`
 - Full API Reference: `docs/API.md`
+

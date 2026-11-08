@@ -157,3 +157,4 @@ Server-Sent Events (SSE) is an HTTP standard that allows a server to push real-t
    *A:* In async Python with FastAPI and `httpx`, the response generator checks client connection status on each iteration. If the client disconnects, an `asyncio.CancelledError` is raised. Relay catches this cancellation and calls `response.aclose()` on the upstream `httpx` stream, terminating the upstream connection and halting token generation at the provider.
 3. **Q: Why use Server-Sent Events (SSE) instead of WebSockets for LLM streaming and the dashboard?**  
    *A:* LLM token streaming and dashboard metrics are unidirectional: the server streams data to the client, but the client does not need to send bidirectional binary frames back over the same channel. SSE operates over standard HTTP/1.1 or HTTP/2, works natively with browser `EventSource`, traverses proxies and corporate firewalls without special configuration, and features built-in reconnection protocols.
+
