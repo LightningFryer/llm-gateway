@@ -8,6 +8,7 @@ No ORM or migration tools are used.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import sqlite3
@@ -107,10 +108,31 @@ class RequestLogRecord:
     error_type: str | None
 
 
-async def init_db(db_path: str) -> None:
-    """Initializes SQLite database with WAL mode and tables."""
+async def init_db(db_path: str, admin_key: str = "relay_admin_secret_key_12345") -> None:
+    """Initializes SQLite database with WAL mode and tables, and seeds admin key."""
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(SCHEMA_SQL)
+        admin_hash = hashlib.sha256(admin_key.strip().encode("utf-8")).hexdigest()
+        now = datetime.now(UTC).isoformat()
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO api_keys (
+                id, name, key_hash, key_prefix, rpm_limit, tpm_limit,
+                monthly_budget_usd, allowed_aliases, enabled, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """,
+            (
+                "admin-master-key",
+                "Admin Master Key",
+                admin_hash,
+                "admin",
+                100000,
+                100000000,
+                999999.0,
+                '["*"]',
+                now,
+            ),
+        )
         await db.commit()
     logger.info("SQLite database initialized successfully at %s (WAL mode enabled)", db_path)
 

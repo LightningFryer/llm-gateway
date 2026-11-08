@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Relay gateway starting up...")
 
     # Initialize SQLite schema and enable WAL mode
-    await init_db(settings.database_path)
+    await init_db(settings.database_path, settings.relay_admin_key)
 
     # Start off-the-hot-path background log batch writer
     log_writer = get_log_writer(settings.database_path)

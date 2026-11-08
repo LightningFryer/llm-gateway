@@ -34,6 +34,7 @@ export default function PlaygroundPage() {
   const [alias, setAlias] = useState("fast");
   const [temperature, setTemperature] = useState(0.0); // 0.0 allows exact-match caching
   const [stream, setStream] = useState(true);
+  const [apiKey, setApiKey] = useState("");
   const [prompt, setPrompt] = useState("Explain how a circuit breaker works in distributed systems.");
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingContent, setStreamingContent] = useState("");
@@ -66,11 +67,13 @@ export default function PlaygroundPage() {
     const startTime = performance.now();
     let firstTokenTime: number | null = null;
 
+    const activeToken = apiKey.trim() || ADMIN_KEY;
+
     try {
       const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${ADMIN_KEY}`,
+          Authorization: `Bearer ${activeToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
@@ -234,6 +237,21 @@ export default function PlaygroundPage() {
               <option value="cheap">cheap (Cost-optimized routing)</option>
               <option value="balanced">balanced (Weighted round-robin)</option>
             </select>
+          </div>
+
+          {/* API Key Override (Optional) */}
+          <div>
+            <div className="flex justify-between text-xs text-gray-300 mb-1.5">
+              <span>Client API Key</span>
+              <span className="text-[10px] text-gray-500">Optional</span>
+            </div>
+            <input
+              type="text"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Default: Admin Master Key"
+              className="w-full bg-[#0d131f] border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+            />
           </div>
 
           {/* Temperature Slider */}

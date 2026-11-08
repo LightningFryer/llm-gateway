@@ -56,8 +56,7 @@ async def test_db_init_and_key_crud(temp_db_path: str) -> None:
 
     # 4. List keys
     all_keys = await list_api_keys(temp_db_path)
-    assert len(all_keys) == 1
-    assert all_keys[0].id == key.id
+    assert any(k.id == key.id for k in all_keys)
 
     # 5. Update key
     updated = await update_api_key(
