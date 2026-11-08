@@ -23,9 +23,19 @@ from relay.cache import (
     should_cache_request,
 )
 from relay.circuit_breaker import CircuitState, get_circuit_breaker
-from relay.config import get_settings
+from relay.config import Settings, get_settings
+from relay.cost import check_budget_available
 from relay.db import ApiKeyRecord, RequestLogRecord, get_log_writer
 from relay.events import RelayEvent, get_event_bus
+from relay.metrics import (
+    ACTIVE_STREAMS,
+    CACHE_EVENTS,
+    COST_TOTAL_USD,
+    REQUEST_LATENCY,
+    REQUESTS_TOTAL,
+    TOKENS_TOTAL,
+    TTFT_HISTOGRAM,
+)
 from relay.providers import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -54,17 +64,16 @@ CONCURRENCY_LIMIT_PER_PROVIDER = 50
 # Fallback in-memory rate limiter
 _memory_limiter = MemoryRateLimiter()
 
+_last_redis_check_ts: float = 0.0
+_redis_is_online: bool = False
+_shared_redis_client: aioredis.Redis | None = None
+
 
 def _get_semaphore(provider_name: str) -> asyncio.Semaphore:
     """Returns or creates the concurrency semaphore for a provider."""
     if provider_name not in _provider_semaphores:
         _provider_semaphores[provider_name] = asyncio.Semaphore(CONCURRENCY_LIMIT_PER_PROVIDER)
     return _provider_semaphores[provider_name]
-
-
-_last_redis_check_ts: float = 0.0
-_redis_is_online: bool = False
-_shared_redis_client: aioredis.Redis | None = None
 
 
 async def _get_active_redis() -> aioredis.Redis | None:
@@ -137,13 +146,29 @@ async def create_chat_completion(
     request: Request,
     api_key: Annotated[ApiKeyRecord, Depends(get_current_api_key)],
     model_router: Annotated[Router, Depends(get_router)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
-    """Handles chat completions with routing, caching, rate limiting, and failover."""
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     event_bus = get_event_bus()
     cache = get_response_cache()
 
-    # 1. Rate Limiting Check (RPM and TPM)
+    # 1. Budget Enforcement Check
+    is_budget_ok, current_spend = await check_budget_available(
+        settings.database_path, api_key.id, api_key.monthly_budget_usd
+    )
+    if not is_budget_ok:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "error": {
+                    "message": f"Monthly budget limit of ${api_key.monthly_budget_usd:.2f} exceeded. Current spend: ${current_spend:.4f}.",
+                    "type": "budget_exceeded",
+                    "code": 402,
+                }
+            },
+        )
+
+    # 2. Rate Limiting Check (RPM and TPM)
     limiter = await _get_rate_limiter()
     rpm_res = await limiter.check_and_consume(
         key_id=api_key.id,
@@ -170,7 +195,6 @@ async def create_chat_completion(
             },
         )
 
-    # Estimate prompt tokens for TPM limit
     est_prompt_tokens = max(
         1, int(sum(len(m.content.split()) for m in request_body.messages) * 1.3)
     )
@@ -199,7 +223,7 @@ async def create_chat_completion(
             },
         )
 
-    # 2. Validate Model Alias Permissions
+    # 3. Validate Model Alias Permissions
     allowed = api_key.allowed_aliases
     if "*" not in allowed and request_body.model not in allowed:
         raise HTTPException(
@@ -213,7 +237,7 @@ async def create_chat_completion(
             },
         )
 
-    # 3. Check Alias in Router
+    # 4. Check Alias in Router
     alias_cfg = model_router.get_alias(request_body.model)
     if not alias_cfg:
         raise HTTPException(
@@ -228,7 +252,7 @@ async def create_chat_completion(
             },
         )
 
-    # 4. Check Cache & Request Coalescing
+    # 5. Check Cache & Request Coalescing
     cache_control = request.headers.get("Cache-Control")
     can_cache = should_cache_request(request_body, cache_control)
     cache_key = build_cache_key(request_body.model, request_body) if can_cache else ""
@@ -237,7 +261,7 @@ async def create_chat_completion(
     if can_cache and cache_key:
         cached = await cache.get(cache_key)
         if cached:
-            # Immediate Cache Hit
+            CACHE_EVENTS.labels(status="hit").inc()
             if not request_body.stream:
                 resp_obj = ChatCompletionResponse(
                     id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -263,6 +287,9 @@ async def create_chat_completion(
                     "X-Relay-Attempts": "0",
                     "X-Relay-Latency-Ms": "1.50",
                 }
+                REQUESTS_TOTAL.labels(
+                    alias=request_body.model, provider="cache", status="200"
+                ).inc()
                 return JSONResponse(content=resp_obj.model_dump(), headers=headers)
             else:
                 headers = {
@@ -273,19 +300,22 @@ async def create_chat_completion(
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
                 }
+                REQUESTS_TOTAL.labels(
+                    alias=request_body.model, provider="cache", status="200"
+                ).inc()
                 return StreamingResponse(
                     cache.stream_cached_response(cached, request_body.model, request_id),
                     media_type="text/event-stream",
                     headers=headers,
                 )
 
-        # Single-flight request coalescing
+        CACHE_EVENTS.labels(status="miss").inc()
         is_leader, coalesce_event = cache.acquire_single_flight(cache_key)
         if not is_leader:
-            # Wait for leader to populate cache
             await coalesce_event.wait()
             cached_coalesced = await cache.get(cache_key)
             if cached_coalesced:
+                CACHE_EVENTS.labels(status="hit").inc()
                 if not request_body.stream:
                     resp_obj = ChatCompletionResponse(
                         id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -314,16 +344,18 @@ async def create_chat_completion(
                         "X-Relay-Attempts": "0",
                         "X-Relay-Latency-Ms": "2.00",
                     }
+                    REQUESTS_TOTAL.labels(
+                        alias=request_body.model, provider="cache", status="200"
+                    ).inc()
                     return JSONResponse(content=resp_obj.model_dump(), headers=headers)
 
-    # 5. Determine Circuit Breaker Status of all targets
+    # 6. Determine Circuit Breaker Status
     open_circuits: set[str] = set()
     for t in alias_cfg.targets:
         cb = get_circuit_breaker(t.provider)
         if await cb.get_state() == CircuitState.OPEN:
             open_circuits.add(t.provider)
 
-    # 6. Plan Candidates based on routing strategy (excluding OPEN circuits)
     targets = model_router.plan_targets(request_body.model, open_circuit_providers=open_circuits)
     if not targets:
         if can_cache and cache_key and is_leader:
@@ -343,7 +375,7 @@ async def create_chat_completion(
     start_time = time.perf_counter()
 
     # ==========================================================================
-    # 7. Non-Streaming Execution with Transparent Failover
+    # 7. Non-Streaming Execution
     # ==========================================================================
     if not request_body.stream:
         last_error: Exception | None = None
@@ -356,9 +388,6 @@ async def create_chat_completion(
                 sem = _get_semaphore(target.provider)
 
                 if sem.locked():
-                    logger.warning(
-                        "Provider '%s' semaphore saturated, attempting failover", target.provider
-                    )
                     continue
 
                 try:
@@ -397,7 +426,18 @@ async def create_chat_completion(
                         resp.completion_tokens / 1_000_000.0
                     ) * target.cost_output_per_million
 
-                    # Store in response cache if eligible
+                    # Update Prometheus metrics
+                    REQUESTS_TOTAL.labels(
+                        alias=request_body.model, provider=target.provider, status="200"
+                    ).inc()
+                    REQUEST_LATENCY.labels(
+                        alias=request_body.model, provider=target.provider
+                    ).observe(total_latency_ms / 1000.0)
+                    TOKENS_TOTAL.labels(direction="prompt").inc(resp.prompt_tokens)
+                    TOKENS_TOTAL.labels(direction="completion").inc(resp.completion_tokens)
+                    COST_TOTAL_USD.inc(cost_usd)
+
+                    # Cache result
                     if can_cache and cache_key:
                         entry = CachedEntry(
                             content=resp.content,
@@ -456,12 +496,6 @@ async def create_chat_completion(
                 except Exception as e:
                     last_error = e
                     await cb.record_failure(e)
-                    logger.warning(
-                        "Target provider '%s' failed on attempt %d: %s. Initiating failover.",
-                        target.provider,
-                        attempt_count,
-                        e,
-                    )
                     await event_bus.publish(
                         RelayEvent(
                             event_type="failover",
@@ -476,13 +510,12 @@ async def create_chat_completion(
                     if not is_retryable_error(e):
                         break
 
-            # All targets exhausted
-            total_latency_ms = (time.perf_counter() - start_time) * 1000.0
+            REQUESTS_TOTAL.labels(alias=request_body.model, provider="none", status="502").inc()
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail={
                     "error": {
-                        "message": f"All upstream providers failed. Last error: {last_error}",
+                        "message": f"All upstream providers failed: {last_error}",
                         "type": "bad_gateway",
                         "code": 502,
                     }
@@ -493,7 +526,7 @@ async def create_chat_completion(
                 cache.release_single_flight(cache_key)
 
     # ==========================================================================
-    # 8. Streaming Execution with Transparent Pre-Token Failover
+    # 8. Streaming Execution
     # ==========================================================================
     async def sse_event_generator() -> AsyncIterator[str]:
         prompt_tokens = max(1, sum(len(m.content.split()) for m in request_body.messages))
@@ -501,6 +534,7 @@ async def create_chat_completion(
         ttft_recorded: float | None = None
         attempt_count = 0
         collected_chunks_text: list[str] = []
+        ACTIVE_STREAMS.inc()
 
         try:
             for target in targets:
@@ -511,16 +545,9 @@ async def create_chat_completion(
 
                 first_chunk = None
                 try:
-                    # Pre-first-token phase
                     first_chunk = await stream_iter.__anext__()
                 except Exception as e:
                     await cb.record_failure(e)
-                    logger.warning(
-                        "Streaming pre-token failure on '%s' (attempt %d): %s. Failing over.",
-                        target.provider,
-                        attempt_count,
-                        e,
-                    )
                     await event_bus.publish(
                         RelayEvent(
                             event_type="failover",
@@ -534,11 +561,12 @@ async def create_chat_completion(
                     )
                     continue
 
-                # Yield initial chunk
                 ttft_recorded = (time.perf_counter() - start_time) * 1000.0
+                TTFT_HISTOGRAM.labels(alias=request_body.model, provider=target.provider).observe(
+                    ttft_recorded / 1000.0
+                )
                 yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-                # Mid-stream phase
                 try:
                     async for chunk in stream_iter:
                         if chunk.choices and chunk.choices[0].delta.content:
@@ -556,7 +584,16 @@ async def create_chat_completion(
                         completion_tokens / 1_000_000.0
                     ) * target.cost_output_per_million
 
-                    # Cache streamed result
+                    REQUESTS_TOTAL.labels(
+                        alias=request_body.model, provider=target.provider, status="200"
+                    ).inc()
+                    REQUEST_LATENCY.labels(
+                        alias=request_body.model, provider=target.provider
+                    ).observe(total_latency_ms / 1000.0)
+                    TOKENS_TOTAL.labels(direction="prompt").inc(prompt_tokens)
+                    TOKENS_TOTAL.labels(direction="completion").inc(completion_tokens)
+                    COST_TOTAL_USD.inc(cost_usd)
+
                     if can_cache and cache_key:
                         full_content = "".join(collected_chunks_text)
                         entry = CachedEntry(
@@ -605,7 +642,6 @@ async def create_chat_completion(
                     return
 
                 except Exception as e:
-                    logger.error("Mid-stream failure on provider '%s': %s", target.provider, e)
                     await cb.record_failure(e)
                     error_event = {
                         "error": {
@@ -628,6 +664,7 @@ async def create_chat_completion(
             yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
+            ACTIVE_STREAMS.dec()
             if can_cache and cache_key and is_leader:
                 cache.release_single_flight(cache_key)
 
