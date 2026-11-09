@@ -164,6 +164,15 @@ class GeminiProvider(Provider):
 
             # Parse content from candidates
             candidates = data.get("candidates", [])
+            if not candidates and "promptFeedback" in data:
+                feedback = data["promptFeedback"]
+                block_reason = feedback.get("blockReason", "SAFETY")
+                raise RelayProviderError(
+                    provider=self.name,
+                    message=f"Gemini prompt blocked by safety filters ({block_reason}): {feedback}",
+                    status_code=400,
+                )
+
             content = ""
             if candidates:
                 cand = candidates[0]
@@ -231,6 +240,15 @@ class GeminiProvider(Provider):
                         chunk_dict = json.loads(json_str)
                     except json.JSONDecodeError:
                         continue
+
+                    if "promptFeedback" in chunk_dict and not chunk_dict.get("candidates"):
+                        feedback = chunk_dict["promptFeedback"]
+                        if feedback.get("blockReason"):
+                            raise RelayProviderError(
+                                provider=self.name,
+                                message=f"Gemini stream blocked by safety filter: {feedback}",
+                                status_code=400,
+                            )
 
                     candidates = chunk_dict.get("candidates", [])
                     if not candidates:

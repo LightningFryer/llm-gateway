@@ -56,16 +56,28 @@ def estimate_messages_tokens(messages: list[dict[str, Any]] | list[Any]) -> int:
     return total
 
 
+def calculate_cost_usd(
+    tokens_in: int,
+    tokens_out: int,
+    cost_in_per_m: float,
+    cost_out_per_m: float,
+) -> float:
+    """Calculates cost in USD based on input/output tokens and per-million token rates."""
+    return (tokens_in / 1_000_000.0) * cost_in_per_m + (tokens_out / 1_000_000.0) * cost_out_per_m
+
+
 async def check_budget_available(
     db_path: str,
     key_id: str,
-    monthly_budget_usd: float,
+    monthly_budget_usd: float | None,
 ) -> tuple[bool, float]:
     """Checks whether this API key has remaining budget for the current month.
 
-    Returns (is_allowed, current_spend_usd).
+    Returns (is_allowed, current_spend_usd). A budget of None or <= 0 is treated as unlimited.
     """
     current_spend = await get_monthly_spend(db_path, key_id)
+    if monthly_budget_usd is None or monthly_budget_usd <= 0.0:
+        return True, current_spend
     if current_spend >= monthly_budget_usd:
         return False, current_spend
     return True, current_spend

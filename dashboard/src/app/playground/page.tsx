@@ -79,29 +79,37 @@ export default function PlaygroundPage() {
         body: JSON.stringify(payload),
       });
 
+      const providerHeader = response.headers.get("X-Relay-Provider");
+      const cacheHeader = response.headers.get("X-Relay-Cache");
+
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}));
-        throw new Error(
-          errBody.detail?.error ||
-            errBody.detail?.message ||
-            `HTTP ${response.status}: ${response.statusText}`
-        );
+        const rawErr = errBody.detail?.error || errBody.error || errBody.detail;
+        const msg =
+          typeof rawErr === "object"
+            ? rawErr?.message || JSON.stringify(rawErr)
+            : typeof rawErr === "string"
+            ? rawErr
+            : `HTTP ${response.status}: ${response.statusText}`;
+        throw new Error(msg);
       }
 
       if (stream) {
         const reader = response.body?.getReader();
         const decoder = new TextDecoder("utf-8");
         let accumulated = "";
-        let providerTag = "";
-        let isCached = false;
+        let providerTag = providerHeader || "";
+        let isCached = cacheHeader === "HIT";
 
         if (reader) {
+          let lineBuffer = "";
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
 
-            const textChunk = decoder.decode(value, { stream: true });
-            const lines = textChunk.split("\n");
+            lineBuffer += decoder.decode(value, { stream: true });
+            const lines = lineBuffer.split("\n");
+            lineBuffer = lines.pop() || "";
 
             for (const line of lines) {
               const trimmed = line.trim();
@@ -130,7 +138,7 @@ export default function PlaygroundPage() {
 
         const totalLatency = performance.now() - startTime;
         const ttft = firstTokenTime ? firstTokenTime - startTime : undefined;
-        isCached = totalLatency < 15; // Local cache replay is near-instantaneous
+        isCached = isCached || totalLatency < 20;
 
         setMessages((prev) => [
           ...prev,
@@ -157,9 +165,9 @@ export default function PlaygroundPage() {
         ]);
 
         setMeta({
-          provider: data.provider || "gateway",
+          provider: providerHeader || data.provider || "gateway",
           latency_ms: totalLatency,
-          cached: totalLatency < 15,
+          cached: cacheHeader === "HIT" || totalLatency < 20,
           prompt_tokens: data.usage?.prompt_tokens,
           completion_tokens: data.usage?.completion_tokens,
         });
@@ -172,16 +180,20 @@ export default function PlaygroundPage() {
   };
 
   const handleSendAgain = () => {
-    // Re-send the last user message to show instant cache hit!
+    // Re-send only the user prompt with fresh state for exact cache hit demonstration
     const lastUserMsg = messages
       .slice()
       .reverse()
       .find((m) => m.role === "user");
-    if (lastUserMsg) {
-      handleSend(lastUserMsg.content);
-    } else {
-      handleSend(prompt);
-    }
+    const textToResend = lastUserMsg?.content || prompt;
+    setMessages([]);
+    setStreamingContent("");
+    setMeta(null);
+    setErrorMsg(null);
+    setTemperature(0.0);
+    setTimeout(() => {
+      handleSend(textToResend);
+    }, 50);
   };
 
   const clearChat = () => {

@@ -30,6 +30,11 @@ export default function AnalyticsPage() {
   const [stats, setStats] = useState<GatewayStats | null>(null);
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -49,12 +54,23 @@ export default function AnalyticsPage() {
     load();
   }, []);
 
-  const topKeysData =
-    stats?.top_keys_by_spend?.map((k) => ({
-      name: k.name || k.key_prefix,
-      spend: parseFloat((k.spend_usd ?? 0).toFixed(4)),
-      requests: k.requests ?? 0,
-    })) || [];
+  const topKeysData = (() => {
+    const fromStats = stats?.top_keys_by_spend || [];
+    if (fromStats.length > 0) {
+      return fromStats.map((k) => ({
+        name: k.name || k.key_prefix,
+        spend: parseFloat((k.spend_usd ?? 0).toFixed(4)),
+        requests: k.requests ?? 0,
+      }));
+    }
+    return keys
+      .map((k) => ({
+        name: k.name || k.key_prefix,
+        spend: parseFloat((k.current_month_spend_usd ?? 0).toFixed(4)),
+        requests: 0,
+      }))
+      .filter((k) => k.spend > 0);
+  })();
 
   return (
     <div className="space-y-6">
@@ -130,7 +146,7 @@ export default function AnalyticsPage() {
               <div className="h-full flex items-center justify-center text-gray-500 text-xs">
                 No spend data logged yet
               </div>
-            ) : (
+            ) : mounted ? (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={topKeysData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                   <XAxis dataKey="name" stroke="#6b7280" fontSize={11} tickLine={false} />
@@ -146,7 +162,7 @@ export default function AnalyticsPage() {
                   <Bar dataKey="spend" fill="#3b82f6" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
-            )}
+            ) : null}
           </div>
         </div>
 
@@ -168,7 +184,7 @@ export default function AnalyticsPage() {
               </div>
             ) : (
               keys.map((k) => {
-                const spend = k.current_month_spend_usd || 0;
+                const spend = (k.current_month_spend_usd ?? 0) as number;
                 const budget = k.monthly_budget_usd;
                 const percent =
                   budget && budget > 0 ? Math.min(100, (spend / budget) * 100) : null;

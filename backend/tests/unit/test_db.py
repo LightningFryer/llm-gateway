@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
@@ -107,10 +108,11 @@ async def test_async_log_writer_and_spend(temp_db_path: str) -> None:
     writer.start()
 
     # Enqueue 3 logs
+    now_iso = datetime.now(UTC).isoformat()
     for i in range(3):
         rec = RequestLogRecord(
             id=str(uuid.uuid4()),
-            timestamp="2026-11-08T12:00:00Z",
+            timestamp=now_iso,
             api_key_id=key.id,
             alias="fast",
             provider="mock-a",
@@ -137,4 +139,4 @@ async def test_async_log_writer_and_spend(temp_db_path: str) -> None:
 
     # Check stats summary
     stats = await get_stats_summary(temp_db_path)
-    assert stats["total_requests"] >= 0
+    assert stats["total_requests"] == 3

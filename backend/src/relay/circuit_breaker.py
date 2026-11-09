@@ -304,6 +304,8 @@ def get_circuit_breaker(
             redis_client=redis_client,
             clock=clock,
         )
+    elif redis_client is not None and _circuit_breakers[provider_name].redis is None:
+        _circuit_breakers[provider_name].redis = redis_client
     return _circuit_breakers[provider_name]
 
 

@@ -18,7 +18,7 @@ class RetryConfig:
     jitter: bool = True
 
 
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 529}
 NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404, 422}
 
 
@@ -43,7 +43,8 @@ def is_retryable_error(exc_or_status: Exception | int) -> bool:
         return True
 
     # Check for HTTP status codes inside HTTP exceptions
-    status_code = getattr(exc_or_status, "status_code", None)
+    response = getattr(exc_or_status, "response", None)
+    status_code = getattr(response, "status_code", None) or getattr(exc_or_status, "status_code", None)
     if status_code is not None:
         return status_code in RETRYABLE_STATUS_CODES
 

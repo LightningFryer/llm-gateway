@@ -151,12 +151,12 @@ Restores all providers back to zero latency, zero errors, and healthy status.
 Lists all generated client API keys with prefix, rate limits, and budget spend.
 
 ### `POST /admin/keys`
-Creates a new client API key. Returns raw secret (shown only once) and key record.
+Creates a new client API key. Returns raw secret (shown only once) and key record. Accepts `rpm_limit` (or `rate_limit_rpm`) and `tpm_limit` (or `rate_limit_tpm`).
 ```json
 {
   "name": "staging-client",
-  "rate_limit_rpm": 120,
-  "rate_limit_tpm": 200000,
+  "rpm_limit": 120,
+  "tpm_limit": 200000,
   "monthly_budget_usd": 100.0
 }
 ```
@@ -165,7 +165,7 @@ Creates a new client API key. Returns raw secret (shown only once) and key recor
 Rotates the secret of an existing key. Invalidates the old secret immediately.
 
 ### `PATCH /admin/keys/{id}`
-Enables or disables an API key (`{"is_active": false}`).
+Enables or disables an API key (`{"enabled": false}` or `{"is_active": false}`).
 
 ### `GET /admin/config`
 Returns parsed contents of `config/models.yaml`.

@@ -72,7 +72,7 @@ class MockProvider(Provider):
         if slow_ttft_ms is not None:
             self.chaos.slow_ttft_ms = max(0.0, slow_ttft_ms)
         if fail_after_tokens is not None:
-            self.chaos.fail_after_tokens = fail_after_tokens if fail_after_tokens > 0 else None
+            self.chaos.fail_after_tokens = fail_after_tokens if fail_after_tokens >= 0 else None
 
     def reset_chaos(self) -> None:
         """Resets all chaos knobs back to normal healthy defaults."""

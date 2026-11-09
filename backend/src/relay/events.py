@@ -85,15 +85,16 @@ class EventBus:
     async def publish(self, event: RelayEvent) -> None:
         """Publishes an event to all local subscribers and broadcasts to Redis."""
         # 1. Local in-process delivery
-        dead_queues: list[asyncio.Queue[RelayEvent]] = []
         for q in list(self._local_subscribers):
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                dead_queues.append(q)
-
-        for q in dead_queues:
-            self._local_subscribers.discard(q)
+                # Drop oldest event to make room rather than evicting the subscriber
+                try:
+                    q.get_nowait()
+                    q.put_nowait(event)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
 
         # 2. Redis pub/sub broadcast to other replicas
         if self._redis_client:

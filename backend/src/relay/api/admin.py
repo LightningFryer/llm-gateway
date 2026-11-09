@@ -50,16 +50,36 @@ class CreateKeyRequest(BaseModel):
     name: str
     rpm_limit: int = 60
     tpm_limit: int = 60000
+    rate_limit_rpm: int | None = None
+    rate_limit_tpm: int | None = None
     monthly_budget_usd: float = 50.0
     allowed_aliases: list[str] = Field(default_factory=lambda: ["*"])
+
+    def get_rpm(self) -> int:
+        return self.rate_limit_rpm if self.rate_limit_rpm is not None else self.rpm_limit
+
+    def get_tpm(self) -> int:
+        return self.rate_limit_tpm if self.rate_limit_tpm is not None else self.tpm_limit
 
 
 class UpdateKeyRequest(BaseModel):
     enabled: bool | None = None
+    is_active: bool | None = None
     rpm_limit: int | None = None
+    rate_limit_rpm: int | None = None
     tpm_limit: int | None = None
+    rate_limit_tpm: int | None = None
     monthly_budget_usd: float | None = None
     allowed_aliases: list[str] | None = None
+
+    def get_enabled(self) -> bool | None:
+        return self.is_active if self.is_active is not None else self.enabled
+
+    def get_rpm(self) -> int | None:
+        return self.rate_limit_rpm if self.rate_limit_rpm is not None else self.rpm_limit
+
+    def get_tpm(self) -> int | None:
+        return self.rate_limit_tpm if self.rate_limit_tpm is not None else self.tpm_limit
 
 
 # ==============================================================================
@@ -78,15 +98,19 @@ async def list_providers(
 
     # Read Redis EWMA latencies if online
     latencies: dict[str, float] = {}
+    r: aioredis.Redis | None = None
     try:
         r = aioredis.from_url(settings.redis_url, socket_timeout=0.1, decode_responses=True)
-        for name in providers:
-            val = await r.get(f"ewma:{name}:latency")
-            if val:
-                latencies[name] = float(val)
-        await r.aclose()
+        if r is not None:
+            for name in providers:
+                val = await r.get(f"ewma:{name}:latency")
+                if val:
+                    latencies[name] = float(val)
     except Exception:
         pass
+    finally:
+        if r is not None:
+            await r.aclose()
 
     for name, p in providers.items():
         cb = get_circuit_breaker(name)
@@ -107,6 +131,10 @@ async def list_providers(
                 "is_healthy": cb_state != CircuitState.OPEN and not is_down,
                 "ewma_latency_ms": round(latencies.get(name, 50.0), 2),
                 "is_mock": is_mock,
+                "is_down": is_down,
+                "base_latency_ms": chaos_info.get("base_latency_ms", 50) if isinstance(chaos_info, dict) else getattr(chaos_info, "base_latency_ms", 50),
+                "error_rate": chaos_info.get("error_rate", 0.0) if isinstance(chaos_info, dict) else getattr(chaos_info, "error_rate", 0.0),
+                "fail_after_tokens": chaos_info.get("fail_after_tokens", None) if isinstance(chaos_info, dict) else getattr(chaos_info, "fail_after_tokens", None),
                 "chaos": chaos_info,
             }
         )
@@ -210,8 +238,8 @@ async def create_key(
         name=req.name,
         key_hash=key_hash,
         key_prefix=prefix,
-        rpm_limit=req.rpm_limit,
-        tpm_limit=req.tpm_limit,
+        rpm_limit=req.get_rpm(),
+        tpm_limit=req.get_tpm(),
         monthly_budget_usd=req.monthly_budget_usd,
         allowed_aliases=req.allowed_aliases,
     )
@@ -235,9 +263,9 @@ async def update_key(
     await update_api_key(
         db_path=settings.database_path,
         key_id=key_id,
-        enabled=req.enabled,
-        rpm_limit=req.rpm_limit,
-        tpm_limit=req.tpm_limit,
+        enabled=req.get_enabled(),
+        rpm_limit=req.get_rpm(),
+        tpm_limit=req.get_tpm(),
         monthly_budget_usd=req.monthly_budget_usd,
         allowed_aliases=req.allowed_aliases,
     )
@@ -314,6 +342,7 @@ async def get_stats(
         "spend_24h_usd": spend_today,
         "cache_hit_rate": hit_rate,
         "p95_latency_ms": avg_lat,
+        "avg_latency_ms": avg_lat,
         "summary": summary,
         "recent_logs": recent_logs,
         "provider_usage": provider_usage,

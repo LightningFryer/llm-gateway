@@ -67,14 +67,19 @@ class AnthropicProvider(Provider):
         system_prompts: list[str] = [m.content for m in request.messages if m.role == "system"]
         system_content = "\n\n".join(system_prompts) if system_prompts else None
 
-        # Filter messages to user and assistant roles
+        # Filter messages to user and assistant roles and merge consecutive same-role messages
+        raw_msgs = [m for m in request.messages if m.role in ("user", "assistant")]
         messages: list[dict[str, str]] = []
-        for m in request.messages:
-            if m.role in ("user", "assistant"):
+        for m in raw_msgs:
+            if messages and messages[-1]["role"] == m.role:
+                messages[-1]["content"] += "\n\n" + m.content
+            else:
                 messages.append({"role": m.role, "content": m.content})
 
         if not messages:
             messages = [{"role": "user", "content": " "}]
+        elif messages[0]["role"] != "user":
+            messages.insert(0, {"role": "user", "content": "Hello"})
 
         # Temperature in Anthropic is 0.0 to 1.0 (OpenAI is 0.0 to 2.0)
         anthropic_temp = min(1.0, max(0.0, request.temperature / 2.0))

@@ -19,6 +19,7 @@ from relay.config import get_settings
 from relay.db import get_log_writer, init_db
 from relay.events import get_event_bus
 from relay.metrics import get_metrics_content
+from relay.providers import init_real_providers
 
 # Configure structured JSON / standard logging
 logging.basicConfig(
@@ -36,6 +37,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize SQLite schema and enable WAL mode
     await init_db(settings.database_path, settings.relay_admin_key)
+
+    # Register real provider adapters if API keys are configured
+    init_real_providers(settings)
 
     # Start off-the-hot-path background log batch writer
     log_writer = get_log_writer(settings.database_path)
@@ -65,7 +69,7 @@ def create_app() -> FastAPI:
     # CORS configuration to allow the Next.js dashboard to communicate directly
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -126,6 +130,21 @@ def create_app() -> FastAPI:
     async def metrics_endpoint() -> Response:
         content, content_type = get_metrics_content()
         return Response(content=content, media_type=content_type)
+
+    # Catch-all for unhandled exceptions -> OpenAI error shape
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unhandled exception: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "message": "Internal server error.",
+                    "type": "api_error",
+                    "code": 500,
+                }
+            },
+        )
 
     # Mount routers
     app.include_router(health_router)

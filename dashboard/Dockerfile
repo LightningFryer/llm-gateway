@@ -7,6 +7,12 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
+
+ARG NEXT_PUBLIC_GATEWAY_URL=http://localhost:8000
+ARG NEXT_PUBLIC_ADMIN_KEY=relay_admin_secret_key_12345
+ENV NEXT_PUBLIC_GATEWAY_URL=$NEXT_PUBLIC_GATEWAY_URL
+ENV NEXT_PUBLIC_ADMIN_KEY=$NEXT_PUBLIC_ADMIN_KEY
+
 RUN npm run build
 
 # Production runner stage

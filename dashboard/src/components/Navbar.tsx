@@ -9,8 +9,10 @@ import {
   Flame,
   KeyRound,
   Layers,
+  Menu,
   MessageSquare,
   ShieldAlert,
+  X,
 } from "lucide-react";
 import { fetchHealth } from "@/lib/api";
 
@@ -22,6 +24,7 @@ interface NavbarProps {
 export function Navbar({ onOpenChaos, chaosCount = 0 }: NavbarProps) {
   const pathname = usePathname();
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
+  const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -113,25 +116,57 @@ export function Navbar({ onOpenChaos, chaosCount = 0 }: NavbarProps) {
         })}
       </nav>
 
-      {/* Right Controls: Chaos Button */}
-      <div className="flex items-center gap-3">
+      {/* Right Controls: Chaos Button & Mobile Toggle */}
+      <div className="flex items-center gap-2">
         <button
           onClick={onOpenChaos}
-          className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold transition shadow-lg ${
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition shadow-lg ${
             chaosCount > 0
               ? "bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white animate-pulse"
               : "bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30"
           }`}
         >
           <Flame className="w-4 h-4 text-rose-400" />
-          <span>Chaos Panel</span>
+          <span className="hidden sm:inline">Chaos Panel</span>
           {chaosCount > 0 && (
-            <span className="bg-black/40 text-rose-200 text-[10px] font-mono px-1.5 py-0.2 rounded-full">
-              {chaosCount} ACTIVE
+            <span className="bg-black/40 text-rose-200 text-[10px] font-mono px-1.5 py-0.5 rounded-full">
+              {chaosCount}
             </span>
           )}
         </button>
+
+        <button
+          onClick={() => setMobileOpen(!mobileOpen)}
+          className="md:hidden p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition"
+        >
+          {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
       </div>
+
+      {/* Mobile Drawer */}
+      {mobileOpen && (
+        <div className="absolute top-full left-0 w-full bg-[#0d131f] border-b border-gray-800 p-4 flex flex-col gap-2 md:hidden shadow-xl">
+          {navLinks.map((link) => {
+            const Icon = link.icon;
+            const isActive = pathname === link.href;
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                onClick={() => setMobileOpen(false)}
+                className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs font-medium transition ${
+                  isActive
+                    ? "bg-blue-600 text-white"
+                    : "text-gray-400 hover:text-gray-200 hover:bg-gray-800/60"
+                }`}
+              >
+                <Icon className="w-4 h-4" />
+                {link.label}
+              </Link>
+            );
+          })}
+        </div>
+      )}
     </header>
   );
 }

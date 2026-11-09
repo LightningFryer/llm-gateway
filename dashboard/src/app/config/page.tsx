@@ -135,7 +135,7 @@ export default function ConfigPage() {
 
                       <div className="text-right text-[11px]">
                         <div className="text-amber-400">
-                          ${t.cost_input_per_million.toFixed(2)} / ${t.cost_output_per_million.toFixed(2)}
+                          ${(t.cost_input_per_million ?? 0).toFixed(2)} / ${(t.cost_output_per_million ?? 0).toFixed(2)}
                         </div>
                         <div className="text-[9px] text-gray-500">per 1M tokens</div>
                       </div>

@@ -81,6 +81,7 @@ export default function KeysPage() {
     try {
       const res = await rotateKey(k.id);
       setNewKeyRevealed(res.raw_key);
+      setCreateModalOpen(true);
       await loadKeys();
     } catch (err) {
       console.error("Failed to rotate key", err);
@@ -165,11 +166,11 @@ export default function KeysPage() {
                       {k.rate_limit_rpm} req/min
                     </td>
                     <td className="py-3 px-3 text-gray-300">
-                      {k.rate_limit_tpm.toLocaleString()} tok/min
+                      {(k.rate_limit_tpm ?? 0).toLocaleString()} tok/min
                     </td>
                     <td className="py-3 px-3 text-amber-400">
-                      {k.monthly_budget_usd !== null
-                        ? `$${k.monthly_budget_usd.toFixed(2)}`
+                      {k.monthly_budget_usd != null
+                        ? `$${Number(k.monthly_budget_usd).toFixed(2)}`
                         : "Unlimited"}
                     </td>
                     <td className="py-3 px-3">

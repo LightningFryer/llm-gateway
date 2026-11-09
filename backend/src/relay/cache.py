@@ -171,7 +171,7 @@ class ResponseCache:
         entry: CachedEntry,
         model_alias: str,
         request_id: str,
-        pacing_delay: float = 0.015,
+        pacing_delay: float = 0.005,
     ) -> AsyncIterator[str]:
         """Replays a cached completion as realistic SSE chunks for streaming clients."""
         stream_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -190,7 +190,8 @@ class ResponseCache:
         )
         yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-        words = entry.content.split(" ")
+        content = entry.content or ""
+        words = content.split(" ") if content else []
         for i, word in enumerate(words):
             if pacing_delay > 0:
                 await asyncio.sleep(pacing_delay)
@@ -225,4 +226,6 @@ def get_response_cache(redis_client: aioredis.Redis | None = None) -> ResponseCa
     global _response_cache
     if _response_cache is None:
         _response_cache = ResponseCache(redis_client=redis_client)
+    elif redis_client is not None and _response_cache.redis is None:
+        _response_cache.redis = redis_client
     return _response_cache

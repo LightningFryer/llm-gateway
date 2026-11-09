@@ -49,7 +49,13 @@ class Router:
 
     def load_config(self) -> None:
         """Loads or reloads alias mappings from YAML file."""
-        if not os.path.exists(self.config_path):
+        resolved_path = self.config_path
+        if not os.path.exists(resolved_path):
+            parent_candidate = os.path.join("..", self.config_path)
+            if os.path.exists(parent_candidate):
+                resolved_path = parent_candidate
+
+        if not os.path.exists(resolved_path):
             logger.warning(
                 "Config file not found at %s. Using default fallback aliases.", self.config_path
             )
@@ -57,7 +63,7 @@ class Router:
             return
 
         try:
-            with open(self.config_path, encoding="utf-8") as f:
+            with open(resolved_path, encoding="utf-8") as f:
                 raw_data = yaml.safe_load(f) or {}
 
             raw_aliases = raw_data.get("aliases", {})
@@ -67,9 +73,9 @@ class Router:
 
             self.aliases = new_aliases
             self._round_robin_iterators.clear()
-            logger.info("Loaded %d model aliases from %s", len(self.aliases), self.config_path)
+            logger.info("Loaded %d model aliases from %s", len(self.aliases), resolved_path)
         except Exception as e:
-            logger.error("Failed to load router config from %s: %s", self.config_path, e)
+            logger.error("Failed to load router config from %s: %s", resolved_path, e)
             if not self.aliases:
                 self._set_default_fallback_config()
 

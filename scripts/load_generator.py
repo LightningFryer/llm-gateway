@@ -142,6 +142,7 @@ async def load_worker(
     print(f"[*] Gateway: {gateway_url} | Stream ratio: {stream_ratio} | Repeat ratio: {repeat_ratio}\n")
 
     limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
+    tasks: set[asyncio.Task[None]] = set()
     async with httpx.AsyncClient(limits=limits) as client:
         while True:
             now = time.time()
@@ -168,7 +169,7 @@ async def load_worker(
             stream = random.random() < stream_ratio
 
             # Launch request asynchronously
-            asyncio.create_task(
+            t = asyncio.create_task(
                 send_single_request(
                     client=client,
                     gateway_url=gateway_url,
@@ -179,6 +180,8 @@ async def load_worker(
                     metrics=metrics,
                 )
             )
+            tasks.add(t)
+            t.add_done_callback(tasks.discard)
 
             # Periodic stats printing every 5s
             if now >= next_report:
@@ -203,8 +206,9 @@ async def load_worker(
             delay = 1.0 / max(0.1, current_rps)
             await asyncio.sleep(delay)
 
-        # Allow in-flight requests to settle
-        await asyncio.sleep(1.0)
+        # Allow in-flight requests to complete before closing client
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def get_default_api_key() -> str:

@@ -40,6 +40,11 @@ def fake_redis() -> Iterator[fake_aioredis.FakeRedis]:
 @pytest.fixture
 def app_with_db(temp_db_path: str) -> Iterator[TestClient]:
     """Provides a TestClient wired with an initialized temporary database."""
+    old_env_db = os.environ.get("DATABASE_PATH")
+    old_env_admin = os.environ.get("RELAY_ADMIN_KEY")
+    os.environ["DATABASE_PATH"] = temp_db_path
+    os.environ["RELAY_ADMIN_KEY"] = "test_admin_key"
+    get_settings.cache_clear()
 
     def get_test_settings() -> Settings:
         return Settings(
@@ -51,12 +56,21 @@ def app_with_db(temp_db_path: str) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_settings] = get_test_settings
 
-    asyncio.run(init_db(temp_db_path))
+    asyncio.run(init_db(temp_db_path, "test_admin_key"))
 
     with TestClient(app) as client:
         yield client
 
     app.dependency_overrides.clear()
+    if old_env_db is not None:
+        os.environ["DATABASE_PATH"] = old_env_db
+    else:
+        os.environ.pop("DATABASE_PATH", None)
+    if old_env_admin is not None:
+        os.environ["RELAY_ADMIN_KEY"] = old_env_admin
+    else:
+        os.environ.pop("RELAY_ADMIN_KEY", None)
+    get_settings.cache_clear()
 
 
 @pytest.fixture

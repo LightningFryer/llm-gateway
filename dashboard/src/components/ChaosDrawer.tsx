@@ -205,7 +205,7 @@ export function ChaosDrawer({
                         <Sliders className="w-3 h-3" /> Injected Latency
                       </span>
                       <span className="font-mono text-gray-200 font-medium">
-                        {p.base_latency_ms} ms
+                        {p.base_latency_ms ?? 0} ms
                       </span>
                     </div>
                     <input
@@ -213,7 +213,7 @@ export function ChaosDrawer({
                       min="0"
                       max="1500"
                       step="25"
-                      value={p.base_latency_ms}
+                      value={p.base_latency_ms ?? 0}
                       onChange={(e) =>
                         handleLatencyChange(p, Number(e.target.value))
                       }
@@ -228,7 +228,7 @@ export function ChaosDrawer({
                         <AlertTriangle className="w-3 h-3" /> Injected Error Rate
                       </span>
                       <span className="font-mono text-gray-200 font-medium">
-                        {Math.round(p.error_rate * 100)}%
+                        {Math.round((p.error_rate ?? 0) * 100)}%
                       </span>
                     </div>
                     <input
@@ -236,7 +236,7 @@ export function ChaosDrawer({
                       min="0"
                       max="100"
                       step="5"
-                      value={Math.round(p.error_rate * 100)}
+                      value={Math.round((p.error_rate ?? 0) * 100)}
                       onChange={(e) =>
                         handleErrorRateChange(p, Number(e.target.value))
                       }

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
 CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_request_logs_key_id ON request_logs(api_key_id);
 CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON request_logs(provider);
+CREATE INDEX IF NOT EXISTS idx_request_logs_spend ON request_logs(api_key_id, timestamp);
 """
 
 
@@ -116,10 +117,11 @@ async def init_db(db_path: str, admin_key: str = "relay_admin_secret_key_12345")
         now = datetime.now(UTC).isoformat()
         await db.execute(
             """
-            INSERT OR IGNORE INTO api_keys (
+            INSERT INTO api_keys (
                 id, name, key_hash, key_prefix, rpm_limit, tpm_limit,
                 monthly_budget_usd, allowed_aliases, enabled, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(id) DO UPDATE SET key_hash = excluded.key_hash
             """,
             (
                 "admin-master-key",
@@ -375,6 +377,7 @@ async def get_stats_summary(db_path: str) -> dict[str, Any]:
 
         return {
             "total_requests": total,
+            "error_count": errors,
             "error_rate": (errors / total) if total > 0 else 0.0,
             "cache_hit_rate": (hits / total) if total > 0 else 0.0,
             "spend_today_usd": spend,
@@ -490,8 +493,9 @@ class AsyncLogWriter:
         if self._worker_task:
             await self._worker_task
             self._worker_task = None
-        # Flush remaining
-        await self._flush_current_batch()
+        # Flush all remaining batches
+        while not self.queue.empty():
+            await self._flush_current_batch()
         logger.info("AsyncLogWriter stopped cleanly")
 
     async def _batch_drain_loop(self) -> None:
@@ -549,10 +553,11 @@ class AsyncLogWriter:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.executemany(insert_sql, rows)
                 await db.commit()
-            for _ in batch:
-                self.queue.task_done()
         except Exception as e:
             logger.error("Failed to commit log batch of %d items: %s", len(batch), e)
+        finally:
+            for _ in batch:
+                self.queue.task_done()
 
 
 # Global singleton instance of log writer

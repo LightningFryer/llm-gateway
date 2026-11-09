@@ -10,7 +10,7 @@ import secrets
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from relay.config import Settings, get_settings
@@ -52,7 +52,7 @@ async def get_current_api_key(
         )
 
     raw_token = credentials.credentials
-    if raw_token == settings.relay_admin_key:
+    if secrets.compare_digest(raw_token, settings.relay_admin_key):
         existing_admin = await get_api_key_by_id(settings.database_path, "admin-master-key")
         if existing_admin:
             return existing_admin
@@ -102,11 +102,22 @@ async def get_current_api_key(
 
 
 async def verify_admin_key(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Security(security)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> str:
-    """FastAPI dependency: verifies the admin secret token for /admin endpoints."""
-    if not credentials or not credentials.credentials:
+    """FastAPI dependency: verifies the admin secret token for /admin endpoints.
+
+    Accepts token via Authorization header (Bearer <key>) or query parameter (?token=<key>)
+    to support browser EventSource SSE connections which cannot set custom headers.
+    """
+    token: str | None = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    else:
+        token = request.query_params.get("token")
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
@@ -118,7 +129,7 @@ async def verify_admin_key(
             },
         )
 
-    if credentials.credentials != settings.relay_admin_key:
+    if not secrets.compare_digest(token, settings.relay_admin_key):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -126,4 +137,4 @@ async def verify_admin_key(
             },
         )
 
-    return credentials.credentials
+    return token

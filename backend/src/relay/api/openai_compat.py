@@ -80,12 +80,27 @@ async def _get_active_redis() -> aioredis.Redis | None:
     """Checks and caches whether Redis is currently reachable, refreshing at most every 5 seconds."""
     global _last_redis_check_ts, _redis_is_online, _shared_redis_client
     now = time.time()
-    if (now - _last_redis_check_ts) > 5.0 or _shared_redis_client is None:
+    if (now - _last_redis_check_ts) > 5.0:
         _last_redis_check_ts = now
+        # Try to ping existing client first
+        if _shared_redis_client is not None:
+            try:
+                await _shared_redis_client.ping()
+                _redis_is_online = True
+                return _shared_redis_client
+            except Exception:
+                try:
+                    await _shared_redis_client.aclose()
+                except Exception:
+                    pass
+                _shared_redis_client = None
+                _redis_is_online = False
+
+        # Create a new client
         settings = get_settings()
         try:
             client = aioredis.from_url(
-                settings.redis_url, socket_timeout=0.05, decode_responses=True
+                settings.redis_url, socket_timeout=0.5, decode_responses=True
             )
             await client.ping()
             _shared_redis_client = client
@@ -150,7 +165,8 @@ async def create_chat_completion(
 ) -> Response:
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     event_bus = get_event_bus()
-    cache = get_response_cache()
+    active_redis = await _get_active_redis()
+    cache = get_response_cache(active_redis)
 
     # 1. Budget Enforcement Check
     is_budget_ok, current_spend = await check_budget_available(
@@ -312,7 +328,10 @@ async def create_chat_completion(
         CACHE_EVENTS.labels(status="miss").inc()
         is_leader, coalesce_event = cache.acquire_single_flight(cache_key)
         if not is_leader:
-            await coalesce_event.wait()
+            try:
+                await asyncio.wait_for(coalesce_event.wait(), timeout=15.0)
+            except TimeoutError:
+                pass
             cached_coalesced = await cache.get(cache_key)
             if cached_coalesced:
                 CACHE_EVENTS.labels(status="hit").inc()
@@ -348,11 +367,30 @@ async def create_chat_completion(
                         alias=request_body.model, provider="cache", status="200"
                     ).inc()
                     return JSONResponse(content=resp_obj.model_dump(), headers=headers)
+                else:
+                    headers = {
+                        "X-Relay-Request-Id": request_id,
+                        "X-Relay-Provider": "cache",
+                        "X-Relay-Cache": "HIT",
+                        "X-Relay-Attempts": "0",
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                    }
+                    REQUESTS_TOTAL.labels(
+                        alias=request_body.model, provider="cache", status="200"
+                    ).inc()
+                    return StreamingResponse(
+                        cache.stream_cached_response(
+                            cached_coalesced, request_body.model, request_id
+                        ),
+                        media_type="text/event-stream",
+                        headers=headers,
+                    )
 
     # 6. Determine Circuit Breaker Status
     open_circuits: set[str] = set()
     for t in alias_cfg.targets:
-        cb = get_circuit_breaker(t.provider)
+        cb = get_circuit_breaker(t.provider, redis_client=active_redis)
         if await cb.get_state() == CircuitState.OPEN:
             open_circuits.add(t.provider)
 
@@ -384,11 +422,8 @@ async def create_chat_completion(
         try:
             for target in targets:
                 attempt_count += 1
-                cb = get_circuit_breaker(target.provider)
+                cb = get_circuit_breaker(target.provider, redis_client=active_redis)
                 sem = _get_semaphore(target.provider)
-
-                if sem.locked():
-                    continue
 
                 try:
                     async with sem:
@@ -511,6 +546,25 @@ async def create_chat_completion(
                         break
 
             REQUESTS_TOTAL.labels(alias=request_body.model, provider="none", status="502").inc()
+            total_latency_ms = (time.perf_counter() - start_time) * 1000.0
+            fail_log = RequestLogRecord(
+                id=request_id,
+                timestamp=datetime.now(UTC).isoformat(),
+                api_key_id=api_key.id,
+                alias=request_body.model,
+                provider="none",
+                upstream_model="",
+                status=502,
+                attempts=attempt_count,
+                cache_status="MISS",
+                latency_ms=total_latency_ms,
+                ttft_ms=None,
+                tokens_in=0,
+                tokens_out=0,
+                cost_usd=0.0,
+                error_type=str(last_error)[:200] if last_error else "all_providers_failed",
+            )
+            get_log_writer().enqueue(fail_log)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail={
@@ -539,7 +593,7 @@ async def create_chat_completion(
         try:
             for target in targets:
                 attempt_count += 1
-                cb = get_circuit_breaker(target.provider)
+                cb = get_circuit_breaker(target.provider, redis_client=active_redis)
                 provider = get_provider(target.provider)
                 stream_iter = provider.stream(request_body, target.model)
 
@@ -570,7 +624,6 @@ async def create_chat_completion(
                 try:
                     async for chunk in stream_iter:
                         if chunk.choices and chunk.choices[0].delta.content:
-                            completion_tokens += 1
                             collected_chunks_text.append(chunk.choices[0].delta.content)
                         yield f"data: {chunk.model_dump_json()}\n\n"
 
@@ -579,6 +632,9 @@ async def create_chat_completion(
 
                     total_latency_ms = (time.perf_counter() - start_time) * 1000.0
                     await _update_ewma_latency(target.provider, total_latency_ms)
+
+                    full_content = "".join(collected_chunks_text)
+                    completion_tokens = max(1, int(len(full_content.split()) * 1.3))
 
                     cost_usd = (prompt_tokens / 1_000_000.0) * target.cost_input_per_million + (
                         completion_tokens / 1_000_000.0
@@ -595,7 +651,6 @@ async def create_chat_completion(
                     COST_TOTAL_USD.inc(cost_usd)
 
                     if can_cache and cache_key:
-                        full_content = "".join(collected_chunks_text)
                         entry = CachedEntry(
                             content=full_content,
                             model=request_body.model,
@@ -643,6 +698,24 @@ async def create_chat_completion(
 
                 except Exception as e:
                     await cb.record_failure(e)
+                    fail_log = RequestLogRecord(
+                        id=request_id,
+                        timestamp=datetime.now(UTC).isoformat(),
+                        api_key_id=api_key.id,
+                        alias=request_body.model,
+                        provider=target.provider,
+                        upstream_model=target.model,
+                        status=502,
+                        attempts=attempt_count,
+                        cache_status="MISS",
+                        latency_ms=(time.perf_counter() - start_time) * 1000.0,
+                        ttft_ms=ttft_recorded,
+                        tokens_in=prompt_tokens,
+                        tokens_out=completion_tokens,
+                        cost_usd=0.0,
+                        error_type=str(e)[:200],
+                    )
+                    get_log_writer().enqueue(fail_log)
                     error_event = {
                         "error": {
                             "message": f"Upstream provider connection terminated mid-stream: {e}",
@@ -654,6 +727,24 @@ async def create_chat_completion(
                     yield "data: [DONE]\n\n"
                     return
 
+            fail_log = RequestLogRecord(
+                id=request_id,
+                timestamp=datetime.now(UTC).isoformat(),
+                api_key_id=api_key.id,
+                alias=request_body.model,
+                provider="none",
+                upstream_model="",
+                status=503,
+                attempts=attempt_count,
+                cache_status="MISS",
+                latency_ms=(time.perf_counter() - start_time) * 1000.0,
+                ttft_ms=None,
+                tokens_in=prompt_tokens,
+                tokens_out=0,
+                cost_usd=0.0,
+                error_type="all_streaming_providers_failed",
+            )
+            get_log_writer().enqueue(fail_log)
             error_event = {
                 "error": {
                     "message": "All candidate providers failed prior to initial token generation.",

@@ -41,6 +41,9 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_GATEWAY_URL: http://localhost:8000
+        NEXT_PUBLIC_ADMIN_KEY: relay_admin_secret_key_12345
     container_name: relay-dashboard
     ports:
       - "3000:3000"

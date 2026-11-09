@@ -80,7 +80,7 @@ jobs:
           RELAY_ADMIN_KEY: test_admin_key_ci
         run: |
           . .venv/bin/activate
-          pytest --cov=src/relay --cov-report=term-missing backend/tests/
+          pytest --cov=relay --cov-report=term-missing backend/tests/
 
   docker-build:
     name: Docker Images Build Check

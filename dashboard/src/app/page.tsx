@@ -55,8 +55,13 @@ export default function LiveOverviewPage() {
   const [trafficShare, setTrafficShare] = useState<Record<string, number>>({});
   const [sseConnected, setSseConnected] = useState(false);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  const [mounted, setMounted] = useState(false);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Poll stats and providers
   const refreshData = async () => {
@@ -67,6 +72,26 @@ export default function LiveOverviewPage() {
       ]);
       setStats(statsData);
       setProviders(providersData);
+
+      // Seed requests on initial load if empty
+      setRequests((prev) => {
+        if (prev.length === 0 && (statsData as any).recent_logs?.length) {
+          return (statsData as any).recent_logs.map((log: any) => ({
+            id: log.id,
+            timestamp: log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString(),
+            alias: log.alias || "unknown",
+            model: log.upstream_model || log.alias || "unknown",
+            provider: log.provider || "none",
+            status: log.status || 200,
+            cached: log.cache_status === "HIT",
+            latency_ms: log.latency_ms || 0,
+            ttft_ms: log.ttft_ms,
+            tokens: (log.tokens_in || 0) + (log.tokens_out || 0),
+            cost_usd: log.cost_usd || 0,
+          }));
+        }
+        return prev;
+      });
     } catch (err) {
       console.warn("Failed to refresh stats/providers", err);
     }
@@ -92,21 +117,23 @@ export default function LiveOverviewPage() {
       setSseConnected(false);
     };
 
-    es.addEventListener("request_completed", (e) => {
+    const handleRequestCompleted = (e: MessageEvent) => {
       try {
         const payload = JSON.parse(e.data);
         const data = payload.data || {};
         const newReq: RequestRow = {
-          id: data.request_id || Math.random().toString(36).substring(7),
+          id: data.id || data.request_id || Math.random().toString(36).substring(7),
           timestamp: new Date().toLocaleTimeString(),
           alias: data.alias || "unknown",
-          model: data.model || "unknown",
+          model: data.model || data.alias || "unknown",
           provider: data.provider || "none",
-          status: data.status_code || 200,
-          cached: !!data.cached,
+          status: data.status || data.status_code || 200,
+          cached: data.cache_status === "HIT" || !!data.cached,
           latency_ms: data.latency_ms || 0,
           ttft_ms: data.ttft_ms,
-          tokens: (data.prompt_tokens || 0) + (data.completion_tokens || 0),
+          tokens:
+            (data.tokens_in || 0) + (data.tokens_out || 0) ||
+            (data.prompt_tokens || 0) + (data.completion_tokens || 0),
           cost_usd: data.cost_usd || 0,
         };
 
@@ -119,17 +146,19 @@ export default function LiveOverviewPage() {
           }));
         }
       } catch (err) {
-        console.error("Error parsing request_completed SSE", err);
+        console.error("Error parsing request.completed SSE", err);
       }
-    });
+    };
 
-    es.addEventListener("circuit_tripped", () => {
-      refreshData();
-    });
+    es.addEventListener("request.completed", handleRequestCompleted);
+    es.addEventListener("request_completed", handleRequestCompleted);
 
-    es.addEventListener("circuit_recovered", () => {
-      refreshData();
-    });
+    es.addEventListener("circuit.open", () => refreshData());
+    es.addEventListener("circuit.closed", () => refreshData());
+    es.addEventListener("circuit.half_open", () => refreshData());
+    es.addEventListener("circuit_tripped", () => refreshData());
+    es.addEventListener("circuit_recovered", () => refreshData());
+    es.addEventListener("chaos.changed", () => refreshData());
 
     return () => {
       es.close();
@@ -378,34 +407,36 @@ export default function LiveOverviewPage() {
           </div>
 
           <div className="h-44 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <XAxis dataKey="name" stroke="#6b7280" fontSize={11} tickLine={false} />
-                <YAxis stroke="#6b7280" fontSize={11} tickLine={false} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "#0d131f",
-                    borderColor: "#374151",
-                    borderRadius: "8px",
-                    fontSize: "12px",
-                  }}
-                />
-                <Bar dataKey="requests" radius={[4, 4, 0, 0]}>
-                  {chartData.map((entry, index) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={
-                        entry.is_down || entry.circuit === "OPEN"
-                          ? "#ef4444"
-                          : entry.circuit === "HALF_OPEN"
-                          ? "#f59e0b"
-                          : "#3b82f6"
-                      }
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+            {mounted && (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <XAxis dataKey="name" stroke="#6b7280" fontSize={11} tickLine={false} />
+                  <YAxis stroke="#6b7280" fontSize={11} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#0d131f",
+                      borderColor: "#374151",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                    }}
+                  />
+                  <Bar dataKey="requests" radius={[4, 4, 0, 0]}>
+                    {chartData.map((entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={
+                          entry.is_down || entry.circuit === "OPEN"
+                            ? "#ef4444"
+                            : entry.circuit === "HALF_OPEN"
+                            ? "#f59e0b"
+                            : "#3b82f6"
+                        }
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
       </div>
